@@ -1,0 +1,5 @@
+# .gitignore
+data/
+meta_data/
+data_debug/
+tmp_data/
