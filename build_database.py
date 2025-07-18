@@ -237,9 +237,9 @@ def scrape_bekanntmachungen_content(url_file, output_dir, min_delay_seconds=1, m
         print(f"Error: URL file '{url_file}' not found. Please ensure it exists.")
         return
     
-    # If debug is not None, process only the first 20 URLs for testing
+    # If debug is not None, process only the first debug URLs for testing
     if debug is not None:
-        urls = urls[:debug]  # For testing, limit to first 20 URLs
+        urls = urls[:debug]  # For testing, limit to first debug URLs
 
     print(f"Found {len(urls)} URLs to process.")
 
@@ -340,7 +340,7 @@ if __name__ == "__main__":
     min_delay_seconds = 1 # Minimum and maximum delay in seconds between requests not to overload the server
     max_delay_seconds = 1.5
     log_file = './meta_data/failed_content_urls.txt' # File where logs of failed URLs will be saved
-    log_file2 = './meta_data/failed_content_urls2.txt' # File where logs of failed URLs will be saved (for retrying)
+    log_file2 = './meta_data/failed_content_urls2.txt' # File where logs of failed URLs will be saved (when running again the script onto the log files)
 
     # ### Building the list of Bekanntmachung links
     # # Ensure the output directory exists
