@@ -13,7 +13,6 @@ from langchain.chains import LLMChain, SimpleSequentialChain, SequentialChain
 import os
 import json
 from dotenv import load_dotenv
-import codecs
 from time import time
 #import pytesseract
 from pdb import set_trace as st
@@ -127,7 +126,9 @@ def extract_info_from_document(doc_path,output_path='',api_key_file='',chunk_siz
         Example: Die Zuschüsse werden als nicht rückzahlbare Projektförderung in der Regel für einen Zeitraum von 24 bis 36 Monaten vergeben.\n\
         Im Fall der Zweitveröffentlichung soll die Embargofrist zwölf Monate nicht überschreiten.\n\
         Expected answer: 36 months"
-    procedure_query = "From the provided text, list any concrete instruction regarding the grant application process, such as documents to prepare, steps to follow. If none can be found, return None."
+    procedure_query = "From the provided text, list any concrete instruction regarding the grant application process, such as documents to prepare, steps to follow.\n\
+        Put a specific focus on the number of stages of the procedure (usually 1, 2 or 3).\n\
+        If none can be found, return None."
     contact_query = "From the provided text, return information about the person(s)\
         that can be contacted for further questions, including whenever possible name, e-mail and phone number, separated by commas.\n\
         If multiple contact persons can be found, return them all in the same format, separated by semicolons.\n\
@@ -141,7 +142,8 @@ def extract_info_from_document(doc_path,output_path='',api_key_file='',chunk_siz
         E-Mail: robert.mueller@bmftr.de\n\
         Expected answer: Alice Schmidt, alice.schmidt@bmftr.de, +49 123 456789; Robert Müller, robert.mueller@bmftr.de, +49 987 654321"
     misc_query = "From the provided text, return any other relevant information that could be useful for the grant application process.\n\
-        Examples of such information include application of the de-minimis rule, possible requirements regarding publications, specific requirements regarding the dissemination of results, etc.\n\
+        Examples of such information include application of the de-minimis rule, possible requirements regarding publications,\
+        specific requirements regarding the dissemination of results, Förderquote, starting date of accpeted projects, etc.\n\
         If none can be found, return None." # NOTE: double check what can constitute useful misc information
 
     # Obtain the results for each query
@@ -160,6 +162,8 @@ def extract_info_from_document(doc_path,output_path='',api_key_file='',chunk_siz
     # t = retriever.get_relevant_documents(deadline_query)
     # t1 = retriever.get_relevant_documents(contact_query)
     # st()
+
+    ### TODO: implementing a post-processing routine to make sure the LLM outputs follow the expected format may be required.
 
     # Combine the results into a structured format, while applying decoding of unicode escape sequences
     extracted_info = {
@@ -223,5 +227,5 @@ def extract_info_from_webpage(webpage_url):
 if __name__ == "__main__":
     #doc_path = r'C:\Users\Frederic\Documents\Programming\Grant-agent\tmp_data\Bekanntmachung_Medizin_der_Zukunft.pdf' # PDF document
     doc_path = r'C:\Users\Frederic\Documents\Programming\Grant-agent\data\2024_08_21_Bekanntmachung_Psychische_Gesundheit.txt' # Text document
-    output_path = './results/'
+    output_path = './evaluation/generated_outputs/'
     extract_info_from_document(doc_path=doc_path,output_path=output_path,chunk_size=4000,chunk_overlap=200)

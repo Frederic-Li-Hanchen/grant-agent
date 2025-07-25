@@ -3,6 +3,6 @@ data/
 meta_data/
 data_debug/
 tmp_data/
-results/
+evaluation/
 ground_truth/
 .env
