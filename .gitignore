@@ -6,5 +6,6 @@ tmp_data/
 evaluation/
 ground_truth/
 .env
+.venv
 test.py
 notes.txt
