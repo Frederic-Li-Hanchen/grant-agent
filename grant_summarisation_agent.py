@@ -73,7 +73,7 @@ def extract_info_from_document(
 
     elif doc_path.endswith('.txt'):
         print(f"Loading text document from {doc_path}...")
-        loader = TextLoader(doc_path)
+        loader = TextLoader(doc_path, encoding='utf-8')
 
     else:
         raise ValueError("The provided path is neither a PDF or text document. Please provide a valid file path.")
@@ -229,8 +229,6 @@ def extract_info_from_document(
     # t = retriever.get_relevant_documents(deadline_query)
     # t1 = retriever.get_relevant_documents(contact_query)
     # st()
-
-    ### TODO: implementing a post-processing routine to make sure the LLM outputs follow the expected format may be required.
 
     # Save the result dictionary into a json file if enabled
     if len(output_path) > 0:
