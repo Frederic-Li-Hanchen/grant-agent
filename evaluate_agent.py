@@ -6,7 +6,12 @@ import json
 import re
 import matplotlib.pyplot as plt
 import seaborn as sns
+from langchain.chains import SimpleSequentialChain, LLMChain
+from langchain.prompts import ChatPromptTemplate
+import dotenv
+from typing import List
 from pdb import set_trace as st # For debugging purposes
+
 
 ### Function to compute the BLEU, ROUGE and BertScore metrics given a ground truth and generated output, and save them in a csv file.
 # Input arguments:
@@ -100,7 +105,6 @@ def compute_metrics(gt_path, gen_path, output_filepath):
         os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
         metrics_df.to_csv(output_filepath, index=False)
         print(f"\nMetrics saved to {output_filepath}")
-
 
 
 ### Function to plot boxplots and violin plots of computed metrics given a csv file containing them
@@ -205,15 +209,179 @@ def plot_metrics(csv_filepath: str, output_folder_path: str):
     fig.tight_layout()
 
     # # Save the plot to a derived filepath
-    # violin_output_filepath = output_filepath.replace('boxplot', 'violinplot')
-    # if violin_output_filepath == output_filepath:  # if 'boxplot' not in name
-    #     name, ext = os.path.splitext(output_filepath)
-    #     violin_output_filepath = f"{name}_violin{ext}"
-
     plt.savefig(os.path.join(output_folder_path,'violinplot.png'), bbox_inches='tight')
     print(f"Violin plot saved to {output_folder_path}")
     plt.close(fig)  # Close the figure to free memory
 
+
+### Helper function that given a ground truth json, specific json field and associated .txt file, returns the text sections from the file where the information to annotated the field is located
+# Input arguments:
+# - [str] doc_path: path to the text document containing the German call
+# - [List[str]] source_spans: a list of section identifiers to extract, e.g. ["1", "annex 3", "introduction"]
+# Returns:
+# - [str] a string containing the concatenated text of the requested sections, separated by "\n\n\n\n\n". Returns the full document if source_spans is empty or contains "document"
+def get_relevant_text_sections(doc_path: str, source_spans: List[str]) -> str:
+    """
+    Extracts specific sections from a grant document based on section numbers or keywords.
+
+    All German documents follow a similar structure, with sections indicated by a
+    number (e.g., "7.2.1 Section title\\n").
+    If source_spans is empty or contains "document", the whole document is returned.
+    source_spans can also contain (not case-sensitive) "Annex n" for an appendix
+    ("Anlage"), or "Introduction" for the part of the document before section 1.
+
+    Args:
+        doc_path: The path to the text document containing the German call.
+        source_spans: A list of section identifiers to extract.
+
+    Returns:
+        A string containing the concatenated text of the requested sections,
+        separated by "\\n\\n\\n\\n\\n". Returns the full document if source_spans is
+        empty or contains "document".
+    """
+    try:
+        with open(doc_path, 'r', encoding='utf-8') as f:
+            full_text = f.read()
+    except FileNotFoundError:
+        return f"Error: Document not found at {doc_path}"
+
+    # If source_spans is empty or requests the whole document, return everything.
+    if not source_spans or any(span.lower().strip() == 'document' for span in source_spans):
+        return full_text
+
+    # Regex to find section numbers like 1., 1.1, 2.3.4 etc. at the start of a line.
+    section_pattern = re.compile(r'^\s*(\d(?:\.\d){0,2})\.?\s+.*')
+    # Regex for Annexes (Anlage)
+    annex_header_pattern = re.compile(r'^\s*Anlage\s*$', re.IGNORECASE)  # Matches lines with only "Anlage"
+
+    # Collect both sections and annexes
+    sections = {}
+    annexes = {}
+    inside_annex = False
+    current_section_number = 'introduction'
+    current_annex_number = 'introduction'
+    current_content = []
+
+    lines = full_text.split('\n')
+
+    # Loop on the lines of the document
+    for line in lines:
+        if annex_header_pattern.match(line): # If the keyword "Anlage" is found alone, bordered by line breaks, this indicates that the next sections belong to an annex
+            inside_annex = True
+            sections[current_section_number] = '\n'.join(current_content).strip()
+            current_content = [line]
+            continue
+        section_match = section_pattern.match(line)
+        
+        # Determine if the line is a new section or annex header
+        new_section_number = None
+        if section_match:
+            new_section_number = section_match.group(1)
+       
+        if new_section_number:
+            # Store the content of the previous section
+            if current_content:
+                if inside_annex:
+                    annexes[current_annex_number] = '\n'.join(current_content).strip()
+                else:
+                    sections[current_section_number] = '\n'.join(current_content).strip()
+            
+            # Start the new section
+            if inside_annex:
+                current_annex_number = new_section_number
+            else:
+                current_section_number = new_section_number
+            current_content = [line]
+        else:
+            current_content.append(line)
+
+    # Store the last section after the loop finishes
+    if current_content:
+        if inside_annex:
+            annexes[current_annex_number] = '\n'.join(current_content).strip()
+        else:
+            sections[current_section_number] = '\n'.join(current_content).strip()
+
+    # Extract and concatenate the requested sections
+    extracted_texts = []
+    for span in set(s.lower().strip() for s in source_spans):
+        if span == 'introduction':
+            if 'introduction' in sections:
+                extracted_texts.append(sections['introduction'])
+        elif span.startswith('annex'):
+            # Extract the annex number (e.g. "1" for "annex 1")
+            annex_number = span.split('annex')[-1].strip()
+            if annex_number in annexes:
+                extracted_texts.append(annexes[annex_number])
+        else:  # It's a section number
+            # Find the content for the exact section number.
+            # This prevents including subsections (e.g., "1.1" when "1" is requested).
+            if span in sections:
+                extracted_texts.append(sections[span])
+
+    return "\n\n\n\n\n ".join(extracted_texts)
+
+
+### Function that implements LLM-as-a-judge evaluation given a ground truth and generated output in csv format
+# NOTE: work in progress
+def llm_as_a_judge_evaluation(gt_path: str, gen_path: str, output_filepath: str, llm_model: str = "gpt-4o"):
+
+    # Ensure paths exist
+    if not os.path.exists(gt_path) or not os.path.exists(gen_path):
+        raise FileNotFoundError("One of the specified paths does not exist.")
+
+    # Load ground truth and generated outputs
+    # NOTE: ground truth and generated files corresponding to the same sample are expected to have the same name
+    gt_files = sorted(os.listdir(gt_path))
+    gen_files = sorted(os.listdir(gen_path))
+
+    # Keep only the files that are present in both directories
+    if len(gt_files) != len(gen_files):
+        print(f"WARNING: different number of ground truth ({len(gt_files)}) and generated ({len(gen_files)}) files. Keeping only matching files.")
+        gt_files = [f for f in gt_files if f in gen_files]
+        gen_files = [f for f in gen_files if f in gt_files]
+    if not gt_files:
+        print("ERROR: No matching files found between ground truth and generated outputs.")
+        return
+
+    # List of keys to extract from the json files
+    json_keys = ["objective", "inclusion_criteria", "exclusion_criteria", "deadline", "max_funding", "max_duration", "procedure", "contact", "misc"]
+    results = []
+
+    # Define the Langchain prompt template that include all evaluation criteria to be scored by the LLM
+    # TODO: the prompt should contain modular fields to be defined depending on the json field being evaluated
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", 
+         "You are an expert in evaluating information extraction tasks from grant documents.\n\
+         You will be provided with some specific information to extract, relevant parts of the original grant document (in German) where the information can be found, the output generated by an agent, the ground truth, some formatting instructions and some examples of scoring.\n\
+         Given all aforementioned information, provide a score on a 5-point Likert scale between 1 (very poor) and 5 (perfect) for each of the following evaluation criterion:\n\
+         ### Criteria:\n\
+         1. **Correctness**: is the generated output factually true and verifiable from the original grant document?\n\
+         2. **Completeness**: does the generated output contain all elements relevant to the specific information to extract?\n\
+         3. **Clarity**: is the language of the generated output clear and easy to understand?\n\
+         4. **Conciseness**: is the generated output to the point, without unnecessary repetitions or irrelevant information?\n\
+         5. **Adherence**: does the generated output follow the formatting instructions provided?\n\
+        Return your scores in a json format where each of the five criteria is a key, and the score the associated value.\n\
+        For example: {'correctness': 4, 'completeness': 3, 'clarity': 5, 'conciseness': 2, 'adherence': 1}\n"), # NOTE: if I want the explanations, I need to add a new json field that would contain them here.
+        ("user", 
+         "### Information to extract: {json_field}\n\
+         ### Extracts from the grant document (in German): {relevant_parts}\n\
+         ### Generated output: {generated_output}\n\
+         ### Ground truth: {ground_truth}\n\
+         ### Formatting instructions: {formatting_instructions}\n\
+         ### Examples: {examples}")
+    ])
+
+    formatting_instructions = {key: "" for key in json_keys} # TODO: fill this dictionary with specific instructions for each json field
+    examples = {key: "" for key in json_keys} # TODO: fill this dictionary with specific examples for each json field
+
+    # Initialise the LLM client
+
+    # Loop on the files to get the scores for each evaluation criterion
+    for gt_file, gen_file in zip(gt_files, gen_files):
+        pass
+
+    # Save the scores to a CSV file
 
 
 ### Main function
@@ -225,6 +393,6 @@ if __name__ == '__main__':
     output_filepath = r'.\evaluation\metrics\gemini-2.5-flash\metrics.csv'
     # compute_metrics(gt_path, gen_path, output_filepath)
 
-    # Plot boxplots of metrics per json field
-    output_folder_path = r'.\evaluation\boxplots\gemini-2.5-flash'
+    # Plot boxplots and violin plots of metrics per json field
+    output_folder_path = r'.\evaluation\plots\gemini-2.5-flash'
     plot_metrics(output_filepath, output_folder_path)
