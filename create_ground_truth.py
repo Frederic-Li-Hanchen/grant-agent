@@ -19,7 +19,12 @@ from pdb import set_trace as st
 # - [int] nb_samples: number of samples to select for the evaluation
 # - [bool] translate: save a translated version of the Bekanntmachungen to make annotation easier.
 # - [int] random_seed: parameter to fix the random seed to ensure the same evaluation subset is kept
-def create_evaluation_set(data_folder_path, result_folder_path, nb_samples, translate=True, random_seed=12345):
+def create_evaluation_set(
+        data_folder_path: str,
+        result_folder_path: str, 
+        nb_samples: int, 
+        translate: bool=True, 
+        random_seed: int=12345) -> None:
 
     start = time()
 

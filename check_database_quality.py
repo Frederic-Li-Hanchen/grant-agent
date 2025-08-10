@@ -6,7 +6,7 @@ import os
 # Input:
 # - [str] database_path: the path to the directory that contains the text files
 # - [str] log_file_path: the path to the directory that contains the log file to save
-def check_database_quality(database_path, log_file_path):
+def check_database_quality(database_path: str, log_file_path: str) -> None:
    
     # Various meta parameters
     nb_amended_bekanntmachungen = 0 # Number of amended Bekanntmachungen

@@ -18,7 +18,7 @@ from pdb import set_trace as st # For debugging purposes
 # - [str] gt_path: path to the folder containing the ground truth json files
 # - [str] gen_path: path to the folder containing the generated json files
 # - [str] output_filepath: path to save the computed metrics in csv format
-def compute_metrics(gt_path, gen_path, output_filepath):
+def compute_metrics(gt_path: str, gen_path: str, output_filepath: str) -> None:
     """
     Compute BLEU, ROUGE, and BertScore metrics between ground truth and generated outputs.
     
@@ -111,7 +111,7 @@ def compute_metrics(gt_path, gen_path, output_filepath):
 # Input arguments:
 # - [str] csv_filepath: path to the csv file containing the computed metrics
 # - [str] output_folder_path: path to the folder where to save both box and violin plots
-def plot_metrics(csv_filepath: str, output_folder_path: str):
+def plot_metrics(csv_filepath: str, output_folder_path: str) -> None:
     """
     Plot grouped boxplots and violin plots of computed metrics from a CSV file.
     

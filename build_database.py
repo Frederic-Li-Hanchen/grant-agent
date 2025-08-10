@@ -5,6 +5,7 @@ import re
 import os
 from time import sleep, time
 import random  # For random sleep intervals
+from typing import Optional
 from pdb import set_trace as st
 
 ### Helper function that checks if a webpage exists
@@ -12,7 +13,7 @@ from pdb import set_trace as st
 # - [str] url: the URL of the webpage to check
 # Output:  
 # - [bool] True if the page exists (HTTP status 200), False otherwise
-def webpage_exists(url):
+def webpage_exists(url: str) -> bool:
     try:
         response = requests.get(url)
         return response.status_code == 200
@@ -83,7 +84,7 @@ def get_bekanntmachung_links(base_url, search_url):
 # - [str] url: the URL of the Bekanntmachung page to extract content from
 # Output:
 # - [str] extracted text: the main text content of the Bekanntmachung, formatted with paragraphs, headings, and list items
-def extract_main_text_via_url(url):
+def extract_main_text_via_url(url: str) -> str:
 
     print(f"Extracting content from {url}...")
     # Fetch the page content
@@ -226,7 +227,13 @@ def extract_main_text_via_url(url):
 # - [None|int] debug: if not set to None, process only the debug first examples
 # Output:
 # - None: the function saves the extracted content to text files in the specified output directory
-def scrape_bekanntmachungen_content(url_file, output_dir, min_delay_seconds=1, max_delay_seconds=3, log_file='./meta_data/failed_content_urls.txt', debug=None):
+def scrape_bekanntmachungen_content(
+        url_file: str,
+        output_dir: str, 
+        min_delay_seconds: int = 1, 
+        max_delay_seconds: int = 3, 
+        log_file: str = './meta_data/failed_content_urls.txt', 
+        debug: Optional[int] = None) -> None:
 
     start = time()  # Start the timer to measure execution time
 
@@ -326,9 +333,6 @@ def scrape_bekanntmachungen_content(url_file, output_dir, min_delay_seconds=1, m
     print(f"Total execution time: {end - start:.2f} seconds.")
 
 
-
-
-
 ### Main function
 if __name__ == "__main__":
 
@@ -342,19 +346,19 @@ if __name__ == "__main__":
     log_file = './meta_data/failed_content_urls.txt' # File where logs of failed URLs will be saved
     log_file2 = './meta_data/failed_content_urls2.txt' # File where logs of failed URLs will be saved (when running again the script onto the log files)
 
-    # ### Building the list of Bekanntmachung links
-    # # Ensure the output directory exists
-    # if not os.path.exists(output_dir):
-    #     os.makedirs(output_dir)
-    #     print(f"Created output directory: {output_dir}")
+    ### Building the list of Bekanntmachung links
+    # Ensure the output directory exists
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        print(f"Created output directory: {output_dir}")
     
-    # # Get the links
-    # bekanntmachung_urls = get_bekanntmachung_links(bmbf_base_url, bmbf_search_url)
-    # print(f"Found {len(bekanntmachung_urls)} unique Bekanntmachung links.")
-    # # Save the list of links to a text file
-    # with open(url_file, 'w', encoding='utf-8') as f:
-    #     for url in bekanntmachung_urls:
-    #         f.write(url + '\n')
+    # Get the links
+    bekanntmachung_urls = get_bekanntmachung_links(bmbf_base_url, bmbf_search_url)
+    print(f"Found {len(bekanntmachung_urls)} unique Bekanntmachung links.")
+    # Save the list of links to a text file
+    with open(url_file, 'w', encoding='utf-8') as f:
+        for url in bekanntmachung_urls:
+            f.write(url + '\n')
 
     ### Retrive the contents of each Bekanntmachung and save them in text format
     scrape_bekanntmachungen_content(url_file, output_dir, min_delay_seconds=min_delay_seconds, max_delay_seconds=max_delay_seconds, log_file=log_file)
@@ -363,4 +367,4 @@ if __name__ == "__main__":
     #scrape_bekanntmachungen_content(url_file, output_dir='./data_debug/', min_delay_seconds=min_delay_seconds, max_delay_seconds=max_delay_seconds, log_file=log_file, debug=20)
 
     ### Retry failed URLs from the log file
-    #scrape_bekanntmachungen_content(log_file, output_dir, min_delay_seconds=min_delay_seconds, max_delay_seconds=max_delay_seconds, log_file=log_file2)
+    scrape_bekanntmachungen_content(log_file, output_dir, min_delay_seconds=min_delay_seconds, max_delay_seconds=max_delay_seconds, log_file=log_file2)

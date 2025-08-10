@@ -27,14 +27,14 @@ from pdb import set_trace as st
 # Output:
 # - [dict] extracted_info: structured information extracted from the document
 def extract_info_from_document(
-        doc_path,
-        output_path='', 
-        model_name="gemini-2.5-flash",
-        temperature=0.1, 
-        max_tokens=4000,
-        model_provider='google_genai',
-        chunk_size=4000, 
-        chunk_overlap=200): # NOTE: chunk size and overlap have to be somewhat tuned depending on the document size and content
+        doc_path: str,
+        output_path: str = '', 
+        model_name: str = "gemini-2.5-flash",
+        temperature: float = 0.1, 
+        max_tokens: int = 4000,
+        model_provider: str = 'google_genai',
+        chunk_size: int = 4000, 
+        chunk_overlap: int = 200) -> dict: # NOTE: chunk size and overlap have to be somewhat tuned depending on the document size and content
     """
     Information to be extracted:
     - Main theme and objectives of the call
