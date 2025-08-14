@@ -6,10 +6,24 @@ import json
 import re
 import matplotlib.pyplot as plt
 import seaborn as sns
-from langchain.chains import SimpleSequentialChain, LLMChain
+#from langchain.chains import SimpleSequentialChain, LLMChain
+from langchain_core.language_models import BaseLanguageModel
 from langchain.prompts import ChatPromptTemplate
-import dotenv
-from typing import List
+from langchain.output_parsers import PydanticOutputParser
+from langchain_core.exceptions import OutputParserException
+#from langchain.chat_models import ChatOpenAI
+from dotenv import load_dotenv
+from typing import List, Dict
+from pydantic import BaseModel, Field
+from langchain.output_parsers import OutputFixingParser
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
+import tenacity
+from langchain_groq import ChatGroq
+import time
+import requests
+import groq
 from pdb import set_trace as st # For debugging purposes
 
 
@@ -245,10 +259,14 @@ def get_relevant_text_sections(doc_path: str, source_spans: List[str]) -> str:
     except FileNotFoundError:
         return f"Error: Document not found at {doc_path}"
 
+    # If source_spans is requests the whole document, return everything.
+    if any(span.lower().strip() == 'document' for span in source_spans):
+        return full_text
+    
     # If source_spans is empty or requests the whole document, return everything.
     if not source_spans or any(span.lower().strip() == 'document' for span in source_spans):
         return full_text
-
+    
     # Regex to find section numbers like 1., 1.1, 2.3.4 etc. at the start of a line.
     # NOTE: some section numbers may be misformatted (e.g. 7.21 instead of 7.2.1), so this should be covered by the regex
     section_pattern = re.compile(r'^\s*(\d(?:\.\d){0,2})\.?\s+.*')
@@ -323,9 +341,35 @@ def get_relevant_text_sections(doc_path: str, source_spans: List[str]) -> str:
     return "\n\n\n\n\n ".join(extracted_texts)
 
 
+
 ### Function that implements LLM-as-a-judge evaluation given a ground truth and generated output in csv format
 # NOTE: work in progress
-def llm_as_a_judge_evaluation(gt_path: str, gen_path: str, output_filepath: str, llm_model: str = "gpt-4o"):
+def llm_as_a_judge_evaluation(
+        gt_path: str, 
+        gen_path: str, 
+        text_path: str, 
+        csv_output_filepath: str, 
+        llm: BaseLanguageModel,
+        embedding_name: str="all-MiniLM-L6-v2",
+        max_context_length: int=16000,
+        chunk_size: int=1000,
+        chunk_overlap: int=100,
+        top_k: int=8) -> None:
+
+    start = time.time()
+
+    # Resume Logic: Check for existing results to avoid re-processing ---
+    already_evaluated = set()
+    existing_results_df = None
+    if os.path.exists(csv_output_filepath):
+        try:
+            print(f"Found existing results file at {csv_output_filepath}. Will skip already evaluated fields.")
+            existing_df = pd.read_csv(csv_output_filepath)
+            for _, row in existing_df.iterrows():
+                already_evaluated.add((row['file'], row['field']))
+        except pd.errors.EmptyDataError:
+            print("Existing results file is empty. Starting fresh.")
+            existing_df = None
 
     # Ensure paths exist
     if not os.path.exists(gt_path) or not os.path.exists(gen_path):
@@ -349,8 +393,16 @@ def llm_as_a_judge_evaluation(gt_path: str, gen_path: str, output_filepath: str,
     json_keys = ["objective", "inclusion_criteria", "exclusion_criteria", "deadline", "max_funding", "max_duration", "procedure", "contact", "misc"]
     results = []
 
+    # Define the output parser that also defines formatting instructions
+    # Pydantic model for the LLM-as-a-judge output
+    class JudgeOutput(BaseModel):
+        scores: Dict[str, int] = Field(description="A dictionary where keys are the evaluation criteria (correctness, completeness, clarity, conciseness, adherence) and values are the scores from 1 to 5.")
+        explanations: Dict[str, str] = Field(description="A dictionary where keys are the evaluation criteria and values are the textual explanations for the scores.")
+    
+    # Use a self-correcting parser that can fix malformed JSON from the LLM
+    parser = PydanticOutputParser(pydantic_object=JudgeOutput)
+    output_fixing_parser = OutputFixingParser.from_llm(parser=parser, llm=llm)
     # Define the Langchain prompt template that include all evaluation criteria to be scored by the LLM
-    # TODO: the prompt should contain modular fields to be defined depending on the json field being evaluated
     prompt = ChatPromptTemplate.from_messages([
         ("system", 
          "### Instructions:\n\
@@ -362,11 +414,7 @@ def llm_as_a_judge_evaluation(gt_path: str, gen_path: str, output_filepath: str,
          3. **Clarity:** is the language of the generated output clear and easy to understand?\n\
          4. **Conciseness:** is the generated output to the point, without unnecessary repetitions or irrelevant information?\n\
          5. **Adherence:** does the generated output follow the formatting instructions provided?\n\
-        Return both your scores and explanations in a json format with two keys called 'scores' and 'explanations'.\n\
-        The value for 'scores' should be a dictionary where each of the five criteria is a key, with the given score as its associated value.\n\
-        The value for 'explanations' should be a dictionary where each of the five criteria is a key, with your explanations in text format as its associated value.\n\
-        For example: {'scores': {'correctness': 4, 'completeness': 3, 'clarity': 5, 'conciseness': 2, 'adherence': 1}, \
-        'explanations': {'correctness': '...', 'completeness': '...', 'clarity': '...', 'conciseness': '...', 'adherence': '...'}}"),
+        {output_format_instructions}"),
         ("user", 
          "### Information to extract: {json_field}\n\
          ### Extracts from the grant document (in German): {relevant_parts}\n\
@@ -375,6 +423,13 @@ def llm_as_a_judge_evaluation(gt_path: str, gen_path: str, output_filepath: str,
          ### Specific instructions: {formatting_instructions}\n\
          ### Example(s): {examples}")
     ])
+
+    # NOTE: old format instructions:
+    # "Return both your scores and explanations in a json format with two keys called 'scores' and 'explanations'.\n\
+    # The value for 'scores' should be a dictionary where each of the five criteria is a key, with the given score as its associated value.\n\
+    # The value for 'explanations' should be a dictionary where each of the five criteria is a key, with your explanations in text format as its associated value.\n\
+    # For example: {'scores': {'correctness': 4, 'completeness': 3, 'clarity': 5, 'conciseness': 2, 'adherence': 1}, \
+    # 'explanations': {'correctness': '...', 'completeness': '...', 'clarity': '...', 'conciseness': '...', 'adherence': '...'}}"
 
     # Specific formatting instructions for each json field
     formatting_instructions = {
@@ -587,25 +642,194 @@ def llm_as_a_judge_evaluation(gt_path: str, gen_path: str, output_filepath: str,
             Diese Bekanntmachung basiert auf dem Abkommen zur Zusammenarbeit im Bereich von Wissenschaft, Forschung und Technologie zwischen Deutschland und Südafrika vom 12. Juni 1996.\n\
             *Expected answer 4:* The participation of companies, especially small and medium enterprises (SME) is particularly welcome."
         }
-    
-    # Initialise the LLM client
 
     # Loop on the files to get the scores for each evaluation criterion
     for gt_file, gen_file in zip(gt_files, gen_files):
-        pass
+        print(f"Evaluating {gt_file}...")
+
+        # Construct path to the original document
+        doc_name = gt_file.replace('.json', '.txt')
+        doc_path = os.path.join(text_path, doc_name)
+
+        if not os.path.exists(doc_path):
+            print(f"  Warning: Could not find source document at {doc_path}. Skipping.")
+            continue
+
+        # Load JSON files
+        try:
+            with open(os.path.join(gt_path, gt_file), 'r', encoding='utf-8') as f:
+                gt_json = json.load(f)
+            with open(os.path.join(gen_path, gen_file), 'r', encoding='utf-8') as f:
+                gen_json = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError) as e:
+            print(f"  Error reading JSON for {gt_file}: {e}. Skipping.")
+            continue
+
+        # Create a robust chain with the fixing parser and automatic retries
+        # on transient errors like server overload or network issues.
+        chain = (prompt | llm | parser).with_retry(
+            stop_after_attempt=3,
+            wait_exponential_jitter=True,
+            retry_if_exception_type=(groq.APIStatusError, requests.exceptions.RequestException)
+        )
+        
+        # Initialize the retriever components once per evaluation run
+        embeddings = HuggingFaceEmbeddings(model_name=embedding_name)
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+
+        # Loop on the json fields to evaluate
+        for key in json_keys:
+            # Resume Logic: Skip if already evaluated
+            if (gt_file, key) in already_evaluated:
+                print(f"  - Skipping already evaluated field: {key}")
+                continue
+
+            print(f"  - Evaluating field: {key}")
+
+            # Prepare the inputs for the prompt
+            ground_truth = gt_json.get(key, "")
+            generated_output = gen_json.get(key, "")
+
+            # Get source spans and extract relevant text
+            source_spans_key = f"{key}_source_spans"
+            source_spans_str = gt_json.get(source_spans_key, "")
+            source_spans = [span.strip() for span in source_spans_str]
+
+            # If source spans are not defined (or refer to the whole document),
+            # the context might be too long. Use RAG to find the most relevant parts.
+            if not source_spans or any(span.lower().strip() == 'document' for span in source_spans):
+                with open(doc_path, 'r', encoding='utf-8') as f:
+                    full_text = f.read()
+
+                if len(full_text) > max_context_length:
+                    print(f"    - Context for '{key}' is the full document and is too long ({len(full_text)} chars). Using RAG to find relevant parts.")
+                    
+                    # 1. Create a targeted retrieval query based on the evaluation task
+                    retrieval_query = f"Information about '{key}': {formatting_instructions.get(key, '')}"
+                    
+                    # 2. Split text and create an in-memory retriever
+                    docs = text_splitter.create_documents([full_text])
+                    vector_store = FAISS.from_documents(docs, embeddings)
+                    retriever = vector_store.as_retriever(search_kwargs={"k": top_k}) # Retrieve top_k chunks
+                    
+                    # 3. Retrieve relevant chunks and construct the context
+                    retrieved_docs = retriever.invoke(retrieval_query)
+                    relevant_parts = "\n\n\n\n\n ".join([doc.page_content for doc in retrieved_docs])
+                else:
+                    relevant_parts = full_text
+            else:
+                # If specific source spans are provided, use them directly.
+                relevant_parts = get_relevant_text_sections(doc_path, source_spans)
+
+            prompt_input = {
+                "json_field": key,
+                "relevant_parts": relevant_parts,
+                "generated_output": generated_output,
+                "ground_truth": ground_truth,
+                "formatting_instructions": formatting_instructions.get(key, ""),
+                "examples": examples.get(key, ""),
+                "output_format_instructions": parser.get_format_instructions()
+            }
+
+            try:
+                # The chain now directly returns a validated JudgeOutput object
+                evaluation_result = chain.invoke(prompt_input)
+                evaluation_scores = evaluation_result.scores
+                for criterion, score in evaluation_scores.items():
+                    results.append({
+                        'file': gt_file,
+                        'field': key,
+                        'criterion': criterion,
+                        'score': score,
+                        'explanation': evaluation_result.explanations.get(criterion, "")
+                    })
+            except OutputParserException as e:
+                # Catch parsing errors specifically if the LLM fails to produce valid JSON
+                print(f"    - Error parsing LLM output for key '{key}': {e}")
+                continue
+            except Exception as e: # Catch other errors, like from the API after retries
+                print(f"    - An unexpected error occurred for key '{key}': {e}")
+                continue
+            time.sleep(1.5) # Pace requests to the API to avoid rate-limiting.
 
     # Save the scores to a CSV file
+    if results:
+        new_results_df = pd.DataFrame(results)
+        
+        # Combine with existing results if any
+        if existing_df is not None:
+            final_df = pd.concat([existing_df, new_results_df], ignore_index=True)
+        else:
+            final_df = new_results_df
+
+        os.makedirs(os.path.dirname(csv_output_filepath), exist_ok=True)
+        final_df.to_csv(csv_output_filepath, index=False, encoding='utf-8')
+        print(f"\nLLM-as-a-judge evaluation saved to {csv_output_filepath}")
 
 
 ### Main function
 if __name__ == '__main__':
 
-    # Compute BLEU, ROUGE and BertScore metrics
-    # gt_path = r'.\evaluation\ground_truth'
-    # gen_path = r'.\evaluation\generated_outputs\gemini-2.5-flash'
-    output_filepath = r'.\evaluation\metrics\gemini-2.5-flash\metrics.csv'
-    # compute_metrics(gt_path, gen_path, output_filepath)
+    # # Compute BLEU, ROUGE and BertScore metrics
+    # # gt_path = r'.\evaluation\ground_truth'
+    # # gen_path = r'.\evaluation\generated_outputs\gemini-2.5-flash'
+    # output_filepath = r'.\evaluation\metrics\gemini-2.5-flash\metrics.csv'
+    # # compute_metrics(gt_path, gen_path, output_filepath)
 
-    # Plot boxplots and violin plots of metrics per json field
-    output_folder_path = r'.\evaluation\plots\gemini-2.5-flash'
-    plot_metrics(output_filepath, output_folder_path)
+    # # Plot boxplots and violin plots of metrics per json field
+    # output_folder_path = r'.\evaluation\plots\gemini-2.5-flash'
+    # plot_metrics(output_filepath, output_folder_path)
+
+    # Initialize the Groq LLM as the judge
+    llm_judge = "llama3-70b-8192"
+    load_dotenv()
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    if not groq_api_key:
+        raise ValueError("GROQ_API_KEY not found among the environment variables defined in .env")
+    print("Evaluating with Llama 3 70B on Groq...")
+    groq_llm = ChatGroq(
+        model=llm_judge,
+        temperature=0.1, 
+    )
+
+    llm_as_a_judge_evaluation(
+        gt_path=r'.\evaluation\ground_truth',
+        gen_path=r'.\evaluation\generated_outputs\gemini-2.5-flash',
+        text_path=r'.\evaluation\data',
+        csv_output_filepath=r'.\evaluation\llm_as_judge\gemini-2.5-flash_judged_by_'+llm_judge+'.csv',
+        llm=groq_llm
+    )
+
+    # # Usage of LLM as a judge 
+    # load_dotenv()
+    # # --- Example 1: Using OpenAI's GPT-4o ---
+    # print("Evaluating with GPT-4o...")
+    # openai_llm = ChatOpenAI(
+    #     model="gpt-4o", 
+    #     temperature=0.1, 
+    #     openai_api_key=os.getenv("OPENAI_API_KEY")
+    # )
+
+    # llm_as_a_judge_evaluation(
+    #     gt_path="path/to/your/ground_truth_data",
+    #     gen_path="path/to/your/generated_data",
+    #     output_filepath="results_openai.csv",
+    #     llm=openai_llm
+    # )
+
+    # # --- Example 2: Using a local model with LlamaCpp ---
+    # print("Evaluating with LlamaCpp...")
+    # # Make sure you have llama-cpp-python installed and a model file downloaded
+    # llamacpp_llm = ChatLlamaCpp(
+    #     model_path="/path/to/your/local-model.gguf",
+    #     temperature=0.1,
+    #     n_ctx=2048,
+    #     # Add other necessary parameters for LlamaCpp
+    # )
+
+    # llm_as_a_judge_evaluation(
+    #     gt_path="path/to/your/ground_truth_data",
+    #     gen_path="path/to/your/generated_data",
+    #     output_filepath="results_llamacpp.csv",
+    #     llm=llamacpp_llm
+    # )
