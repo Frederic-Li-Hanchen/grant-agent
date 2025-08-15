@@ -110,7 +110,7 @@ def extract_info_from_document(
 
     # Define multiple smaller prompts to avoid causing suboptimal matching between the prompt and chunks embeddings
     # NOTE: one startegy to test could be to first ask the LLM to identify the correct sections, then extract the information from them.
-    objective_query = "From the provided text, identify the key objectives of the call and summarise them in a few (e.g. 2 to 5) sentences.\n\
+    objective_query = "### Instructions: From the provided text, identify the key objectives of the call and summarise them in a few (e.g. 2 to 5) sentences.\n\
         This information is usually found in the first sections of the document.\n\
         Focus in particular on the following aspects (if they can be found):\n\
         what should be developped in this project?\n\
@@ -118,64 +118,85 @@ def extract_info_from_document(
         how should it be developped?\n\
         are there specific examples of topics that the call focuses on?" 
     # NOTE: this one is not so easy to define, because the goals can be very broad and vary from call to call.
-    inclusion_query = "From the provided text, list any inclusion criteria for applicants to the call. Check more specifically the following information:\n\
+    inclusion_query = "### Instructions: From the provided text, list any inclusion criteria for applicants to the call. Check more specifically the following information:\n\
         what are the eligible applicants (e.g. university, research institution, company, etc.)?\n\
         are there any specific requirements for the applicants (e.g. past experience in a specific field)?\n\
-        If nothing about inclusion criteria can be found, return None.\n\
-        Example: Der Verbund muss aus mindestens (Minimalanforderung) zwei deutschen Partnern (eine Hochschule oder außer­universitäre Forschungseinrichtung \
-        und ein Unternehmen der gewerblichen Wirtschaft – insbesondere KMU) und drei kanadischen Partnern \
-        (ein Forschungszentrum, eine Universität und ein zuwendungsfähiger kanadischer Firmenpartner) bestehen (2 + 3-Bekanntmachung).\n\
-        Expected answer: The consortium must have 5 partners: one university or research institution and one company from Germany, and one research institution, one university and one company from Canada."
-    exclusion_query = "From the provided text, list any exclusion criteria that could apply to applicants to the call. Check more specifically for the following information:\n \
+        Try to keep your answer as succinct as possible (i.e. low number of items on the list, and only 1 or 2 sentences per item).\n\
+        If nothing about inclusion criteria can be found, return only 'None' without any further explanation.\n\
+        ### Example: Antragsberechtigt sind Hochschulen, außeruniversitäre Forschungseinrichtungen und andere Institutionen, die Forschungsbeiträge liefern, \
+        sowie Unternehmen der gewerblichen Wirtschaft die Zuwendungszweck und Zuwendungsvoraussetzungen erfüllen. \
+        Forschungseinrichtungen, die gemeinsam von Bund und/oder Ländern grundfinanziert werden, kann nur unter bestimmten Voraussetzungen ergänzend zu ihrer \
+        Grundfinanzierung eine Projektförderung für ihre zusätzlichen projektbedingten Ausgaben bzw. Kosten bewilligt werden. \
+        Der Verbund muss aus mindestens (Minimalanforderung) zwei deutschen Partnern (eine Hochschule oder außer­universitäre Forschungseinrichtung und ein Unternehmen der gewerblichen Wirtschaft \
+        - insbesondere KMU) und drei kanadischen Partnern (ein Forschungszentrum, eine Universität und ein zuwendungsfähiger kanadischer Firmenpartner) bestehen (2 + 3-Bekanntmachung).\n\
+        ### Expected answer: Eligible to apply are universities, non-university research institutions and other institutions that provide research contributions, as well as commercial enterprises. \
+        Additionally, the consortium must have 5 partners: one university or research institution and one company from Germany, and one research institution, one university and one company from Canada."
+    exclusion_query = "### Instructions: From the provided text, list any exclusion criteria that could apply to applicants to the call. Check more specifically for the following information:\n \
         is any type of institution prohibited from applying (e.g. companies, research institutions, etc.)? \
-        do applicants have to come from a specific region of the world (e.g. Europe, a specific country)?\
-        If none about exclusion criteria can be found, return None.\n\
-        Example: Hochschulen, die keine Forschungseinrichtungen sind, sind im Rahmen dieser Ausschreibung nicht förderfähig.\n\
-        Expected answer: Universities that are not research institutions are excluded from the call."    
-    deadline_query = "From the provided text, return the latest time at which the first stage of the application can be submitted. \
+        do applicants have to come from a specific region of the world (e.g. Europe, a specific country)? \
+        Try to keep your answer as succinct as possible (i.e. low number of items on the list, and only 1 or 2 sentences per item).\n\
+        If none about exclusion criteria can be found, return only 'None' without any further explanation.\n\
+        ### Example: Antragsberechtigt sind außeruniversitäre Forschungseinrichtungen und andere Institutionen, die Forschungsbeiträge liefern, sowie Unternehmen der gewerblichen Wirtschaft die \
+        Zuwendungszweck und Zuwendungsvoraussetzungen erfüllen. Forschungseinrichtungen, die gemeinsam von Bund und/oder Ländern grundfinanziert werden, kann nur unter bestimmten Voraussetzungen \
+        ergänzend zu ihrer Grundfinanzierung eine Projektförderung für ihre zusätzlichen projektbedingten Ausgaben bzw. Kosten bewilligt werden.Hochschulen, die keine Forschungseinrichtungen sind, \
+        sind im Rahmen dieser Ausschreibung nicht förderfähig.\n\
+        ### Expected answer: Universities that are not research institutions are excluded from the call."    
+    deadline_query = "### Instructions: From the provided text, return the latest time at which the first stage of the application can be submitted. \
         Return only the date formatted as DD.MM.YYYY (and HH:MM if available).\n\
         If several deadlines are provided, return them in the aforementioned format, separated by semi-colons.\n\
-        If no deadline can be found, return None.\n\
-        Example: In der ersten Verfahrensstufe sind dem ABC Projektträger\
-        bis spätestens 25. November 2025 zunächst Projektskizzen in schriftlicher\
+        If no deadline can be found, return only 'None' without any further explanation..\n\
+        ### Example: In der ersten Verfahrensstufe sind dem ABC Projektträger \
+        bis spätestens 25. November 2025 zunächst Projektskizzen in schriftlicher \
         und/oder elektronischer Form über „online-submission-platform“ vorzulegen.\n\
-        Expected answer: 25.11.2025"
-    max_funding_query = "From the provided text, return the maximum funding allowed for the project in euros (or dollars if applicable).\n\
+        ### Expected answer: 25.11.2025"
+    max_funding_query = "### Instructions: From the provided text, return the maximum funding allowed for the project in euros (or dollars if applicable).\n\
         Use comma as thousand separator and dot as decimal point, with the associated currency (e.g. euros, dollars).\n\
         If the information is available, specify if the amount applies to the whole consortium or per partner.\n\
         Be careful as some amounts that are not the maximum funding amount may also be listed in the text.\n\
-        If no amount can be found, return Not specified.\n\
-        Example: Die Zuwendungen werden im Wege der Projektförderung als nicht rückzahlbarer Zuschuss und in der Regel mit bis zu 650 000 Euro pro deutschem Forschungsverbund.\n\
+        If no amount can be found, return only 'Not specified' .\n\
+        ### Example: Die Zuwendungen werden im Wege der Projektförderung als nicht rückzahlbarer Zuschuss und in der Regel mit bis zu 650 000 Euro pro deutschem Forschungsverbund.\n\
         Darüber hinaus veröffentlicht das Ministerium Fördermittel über 100 000 Euro in der Transparenzdatenbank der Ethik-Kommission.\n\
-        Expected answer: 650,000 euros per partner" # NOTE: add one more example where project/partner information is not specified?
-    max_duration_query = "From the provided text, return the maximum duration of the project allowed in months.\n\
+        ### Expected answer: 650,000 euros per partner" # NOTE: add one more example where project/partner information is not specified?
+    max_duration_query = "### Instructions: From the provided text, return the maximum duration of the project allowed in months.\n\
         Be careful as some durations that are not the maximum duration allowed for the project may appear in the text.\n\
-        If none can be found, return Not specified.\n\
-        Example: Die Zuschüsse werden als nicht rückzahlbare Projektförderung in der Regel für einen Zeitraum von 24 bis 36 Monaten vergeben.\n\
+        If none can be found, return only 'Not specified' .\n\
+        ### Example: Die Zuschüsse werden als nicht rückzahlbare Projektförderung in der Regel für einen Zeitraum von 24 bis 36 Monaten vergeben.\n\
         Im Fall der Zweitveröffentlichung soll die Embargofrist zwölf Monate nicht überschreiten.\n\
-        Expected answer: 36 months"
-    procedure_query = "From the provided text, list any concrete instruction regarding the grant application process, such as documents to prepare, steps to follow.\n\
-        Specify the number of stages of the procedure (usually 1, 2 or 3).\n\
-        Pay attention to submission details regarding the documents to be submitted for the first stage,\
-        e.g. language, maximum number of pages allowed, whether the document must be submitted electronically or in written form.\n\
-        If none can be found, return None."
-    contact_query = "From the provided text, return information about the person(s)\
-        that can be contacted for further questions, including whenever possible name, e-mail and phone number, separated by commas.\n\
+        ### Expected answer: 36 months"
+    procedure_query = "### Instructions: From the provided text, return the number of stages of the procedure to follow for the application submission process (usually 1, 2 or 3).\n\
+        Format your answer as follows: 'The procedure is n-stage.', where n is the number of stages.\n\
+        Additionally, briefly describe (i.e. 1 or 2 sentences) the documents to be submitted for the first stage, more specifically regarding \
+        language, maximum number of pages allowed, whether the document must be submitted electronically or in written form.\n\
+        Finally, briefly summarise (i.e. 1 or 2 sentences) what should be done for the next stages, if there are more than one.\n\
+        If no information regarding the procedure can be found, return only 'None' without any further explanation."
+    contact_query = "### Instructions: From the provided text, return information about the person(s) \
+        who can be contacted for further questions, including (whenever provided) name, e-mail and phone number, separated by commas.\n\
         If multiple contact persons can be found, return them all in the same format, separated by semicolons.\n\
         Note that multiple contact persons may share the same contact information.\n\
-        If none can be found, return None.\n\
-        Example: Ansprechpersonen sind:\n\
+        If none can be found, return only 'None' without any further explanation.\n\
+        ### Example: Ansprechpersonen sind:\n\
         Frau Alice Schmidt\n\
         Telefon: +49 123 456789\n\
         E-Mail: alice.schmidt@bmftr.de\n\
         Herr Robert Müller\n\
         Telefon: +49 987 654321\n\
         E-Mail: robert.mueller@bmftr.de\n\
-        Expected answer: Alice Schmidt, alice.schmidt@bmftr.de, +49 123 456789; Robert Müller, robert.mueller@bmftr.de, +49 987 654321"
-    misc_query = "From the provided text, return any other relevant information that could be useful for the grant application process.\n\
-        Examples of such information include whether the de-minimis rule applies, Förderquote for different partners, whether specific \
-        institutions are expressly invited to apply, whether geographical restrictions apply to the results of the project, etc.\n\
-        If none can be found, return None."
+        ### Expected answer: Alice Schmidt, alice.schmidt@bmftr.de, +49 123 456789; Robert Müller, robert.mueller@bmftr.de, +49 987 654321"
+    misc_query = "### Instructions: From the provided text, return any information for the grant application process related to the following list: \
+        whether the de-minimis rule applies to the call, what is the Förderquote for different partners, whether specific \
+        institutions are expressly invited to apply, whether geographical restrictions apply to the results of the project.\n\
+        Keep your answer brief, i.e. no more than one sentence by item.\n\
+        If you cannot find any information about any of the aforementioned items, you do not need to mention them.\n\
+        If none of the aforementioned infromation can be found, return only 'None' without any further explanation.\n\
+        ### Example: 5 Art und Umfang, Höhe der Zuwendung\n\
+        Bemessungsgrundlage für Hochschulen, Forschungs- und Wissenschaftseinrichtungen und vergleichbare Institutionen sind die zuwendungsfähigen projektbezogenen Ausgaben \
+        (bei Helmholtz-Zentren [HZ] und der Fraunhofer-Gesellschaft [Fh G] die zuwendungsfähigen projektbezogenen Kosten), die individuell bis zu 100 % gefördert werden können.\n\
+        Bei Forschungsvorhaben an Hochschulen (staatliche und nicht staatliche) und Universitätskliniken (unabhängig von der Rechtsform) wird zusätzlich zu den zuwendungsfähigen \
+        Ausgaben eine Projektpauschale in Höhe von 20 % gewährt. Es ist zu beachten, dass in der oben genannten, in der Regel gewährten Förderhöchstsumme, die Projektpauschale bereits enthalten ist.\n\
+        Bemessungsgrundlage für Wirtschaftsunternehmen sind die zuwendungsfähigen projektbezogenen Kosten, die in der Regel je nach Anwendungsnähe des Vorhabens bis zu 50 % anteilfinanziert \
+        werden können. Die Bemessung der jeweiligen Förderquote muss die Regelungen der 'De-minimis'-Beihilfe bzw. die AGVO berücksichtigen. Die AGVO lässt für KMU differenzierte Aufschläge zu,\
+        die gegebenenfalls zu einer höheren Förderquote führen können.\n\
+        ### Expected answer: De de-minimis rule applies to this call. The Förderquote is 100% for Universities and Research Institutions, and 50% for commercial enterprises."
     
     # # Obtain the results for each query
     # objective_results = index.query(objective_query, llm=llm, return_source_documents=False, verbose=True)
@@ -232,7 +253,8 @@ def extract_info_from_document(
 
     # Save the result dictionary into a json file if enabled
     if len(output_path) > 0:
-
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
         with open(os.path.join(output_path,new_file_name),'w',encoding='utf-8') as f:
             json.dump(extracted_info,f,indent=4,ensure_ascii=False)
     
@@ -274,15 +296,17 @@ def extract_info_from_webpage(webpage_url):
 if __name__ == "__main__":
 
     # Hyper-parameters
-    data_folder = r'C:\Users\Frederic\Documents\Programming\Grant-agent\evaluation\data'
-    chunk_size = 4000
-    chunk_overlap = 200
     model_name = "gemini-2.5-flash" # NOTE: this can be changed to any other model name supported by the Google Generative AI API
+    data_folder = r'C:\Users\Frederic\Documents\Programming\Grant-agent\evaluation\data'
+    output_path = r'C:\Users\Frederic\Documents\Programming\Grant-agent\evaluation\generated_outputs\\'+ model_name 
+    # data_folder = r'C:\Users\Frederic\Documents\Programming\Grant-agent\evaluation\prompt_val_data' # NOTE: smaller sample of 5 documents for prompt testing
+    # output_path = r'C:\Users\Frederic\Documents\Programming\Grant-agent\evaluation\generated_outputs\\'+ model_name + '_prompt_val' # NOTE: smaller sample of 5 documents for prompt testing
+    chunk_size = 4000
+    chunk_overlap = 20
     temperature = 0.1
     max_tokens = 4000
     model_provider = 'google_genai'
-    output_path = r'C:\Users\Frederic\Documents\Programming\Grant-agent\evaluation\generated_outputs\\'+ model_name 
-
+    
     # Loop on the examples with associated ground truth
     doc_list = [e for e in os.listdir(data_folder) if e.endswith('txt')]
     for doc_name in doc_list:
