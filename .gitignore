@@ -1,7 +1,7 @@
 # .gitignore
 data/
 meta_data/
-data_debug/
+debug_data/
 tmp_data/
 evaluation/
 ground_truth/
