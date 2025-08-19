@@ -24,6 +24,7 @@ from langchain_groq import ChatGroq
 import time
 import requests
 import groq
+import csv
 from pdb import set_trace as st # For debugging purposes
 
 
@@ -370,24 +371,32 @@ def llm_as_a_judge_evaluation(
         llm: BaseLanguageModel,
         embedding_name: str="all-MiniLM-L6-v2",
         max_context_length: int=16000,
-        chunk_size: int=1000,
-        chunk_overlap: int=100,
+        chunk_size: int=1500,
+        chunk_overlap: int=150,
         top_k: int=5) -> None:
 
     start = time.time()
 
     # Resume Logic: Check for existing results to avoid re-processing
     already_evaluated = set()
-    existing_results_df = None
+    existing_df = None
+    existing_csv_lines = []
     if os.path.exists(csv_output_filepath):
         try:
             print(f"Found existing results file at {csv_output_filepath}. Will skip already evaluated fields.")
             existing_df = pd.read_csv(csv_output_filepath)
             for _, row in existing_df.iterrows():
                 already_evaluated.add((row['file'], row['field']))
+            # Load the already computed results from the csv file into a list of dictionaries
+            with open(csv_output_filepath, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                existing_csv_lines = list(reader)
         except pd.errors.EmptyDataError:
             print("Existing results file is empty. Starting fresh.")
             existing_df = None
+    else:
+        # Make sure the directory where the csv file is to be saved exists
+        os.makedirs(os.path.dirname(csv_output_filepath), exist_ok=True)
 
     # Ensure paths exist
     if not os.path.exists(gt_path) or not os.path.exists(gen_path):
@@ -668,147 +677,173 @@ def llm_as_a_judge_evaluation(
             *Expected answer 4:* The participation of companies, especially small and medium enterprises (SME) is particularly welcome."
         }
 
-    # Loop on the files to get the scores for each evaluation criterion
-    for gt_file, gen_file in zip(gt_files, gen_files):
-        print(f"Evaluating {gt_file}...")
+    # Open the csv file of results
+    with open(csv_output_filepath, 'w', encoding='utf-8', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['file', 'field', 'criterion', 'score', 'explanation'])
+        writer.writeheader()
+        writer.writerows(existing_csv_lines)
 
-        # Construct path to the original document
-        doc_name = gt_file.replace('.json', '.txt')
-        doc_path = os.path.join(text_path, doc_name)
+        # Loop on the files to get the scores for each evaluation criterion
+        for gt_file, gen_file in zip(gt_files, gen_files):
+            print(f"Evaluating {gt_file}...")
 
-        if not os.path.exists(doc_path):
-            print(f"  Warning: Could not find source document at {doc_path}. Skipping.")
-            continue
+            # Construct path to the original document
+            doc_name = gt_file.replace('.json', '.txt')
+            doc_path = os.path.join(text_path, doc_name)
 
-        # Load JSON files
-        try:
-            with open(os.path.join(gt_path, gt_file), 'r', encoding='utf-8') as f:
-                gt_json = json.load(f)
-            with open(os.path.join(gen_path, gen_file), 'r', encoding='utf-8') as f:
-                gen_json = json.load(f)
-        except (json.JSONDecodeError, FileNotFoundError) as e:
-            print(f"  Error reading JSON for {gt_file}: {e}. Skipping.")
-            continue
-
-        # Create a robust chain with the fixing parser and automatic retries
-        # on transient errors like server overload or network issues.
-        chain = (prompt | llm | output_fixing_parser).with_retry(
-            stop_after_attempt=3,
-            wait_exponential_jitter=True,
-            retry_if_exception_type=(groq.APIStatusError, requests.exceptions.RequestException)
-        )
-        
-        # Initialize the retriever components once per evaluation run
-        embeddings = HuggingFaceEmbeddings(model_name=embedding_name)
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-
-        # Loop on the json fields to evaluate
-        for key in json_keys:
-            # Resume Logic: Skip if already evaluated
-            if (gt_file, key) in already_evaluated:
-                print(f"  - Skipping already evaluated field: {key}")
+            if not os.path.exists(doc_path):
+                print(f"  Warning: Could not find source document at {doc_path}. Skipping.")
                 continue
 
-            print(f"  - Evaluating field: {key}")
-
-            # Prepare the inputs for the prompt
-            ground_truth = gt_json.get(key, "")
-            generated_output = gen_json.get(key, "")
-
-            # Get source spans and extract relevant text
-            source_spans_key = f"{key}_source_spans"
-            source_spans_str = gt_json.get(source_spans_key, "")
-            source_spans = [span.strip() for span in source_spans_str]
-
-            # If source spans are not defined (or refer to the whole document),
-            # the context might be too long. Use RAG to find the most relevant parts.
-            if not source_spans or any(span.lower().strip() == 'document' for span in source_spans):
-                with open(doc_path, 'r', encoding='utf-8') as f:
-                    full_text = f.read()
-
-                if len(full_text) > max_context_length:
-                    print(f"    - Context for '{key}' is the full document and is too long ({len(full_text)} chars). Using RAG to find relevant parts.")
-                    
-                    # 1. Create a targeted retrieval query based on the evaluation task
-                    retrieval_query = f"Information about '{key}': {formatting_instructions.get(key, '')}"
-                    
-                    # 2. Split text and create an in-memory retriever
-                    docs = text_splitter.create_documents([full_text])
-                    vector_store = FAISS.from_documents(docs, embeddings)
-                    retriever = vector_store.as_retriever(search_kwargs={"k": top_k}) # Retrieve top_k chunks
-                    
-                    # 3. Retrieve relevant chunks and construct the context
-                    retrieved_docs = retriever.invoke(retrieval_query)
-                    relevant_parts = "\n\n\n\n\n ".join([doc.page_content for doc in retrieved_docs])
-                else:
-                    relevant_parts = full_text
-            else:
-                # If specific source spans are provided, use them directly.
-                relevant_parts = get_relevant_text_sections(doc_path, source_spans)
-
-            # Check that the length of the retrieved relevant parts remains below the maximum allowed number of characters for the context
-            disclaimer = '... [context truncated due to length]'
-            if len(relevant_parts) > max_context_length-len(disclaimer):
-                relevant_parts = relevant_parts[:max_context_length-len(disclaimer)]+disclaimer
-
-            prompt_input = {
-                "json_field": key,
-                "relevant_parts": relevant_parts,
-                "generated_output": generated_output,
-                "ground_truth": ground_truth,
-                "formatting_instructions": formatting_instructions.get(key, ""),
-                "examples": examples.get(key, ""),
-                "output_format_instructions": parser.get_format_instructions()
-            }
-
+            # Load JSON files
             try:
-                # The chain now directly returns a validated JudgeOutput object
-                evaluation_result = chain.invoke(prompt_input)
-                evaluation_scores = evaluation_result.scores
-                for criterion, score in evaluation_scores.items():
-                    results.append({
-                        'file': gt_file,
-                        'field': key,
-                        'criterion': criterion,
-                        'score': score,
-                        'explanation': evaluation_result.explanations.get(criterion, "")
-                    })
-            except OutputParserException as e:
-                # Catch parsing errors specifically if the LLM fails to produce valid JSON
-                print(f"    - Error parsing LLM output for key '{key}': {e}")
+                with open(os.path.join(gt_path, gt_file), 'r', encoding='utf-8') as f:
+                    gt_json = json.load(f)
+                with open(os.path.join(gen_path, gen_file), 'r', encoding='utf-8') as f:
+                    gen_json = json.load(f)
+            except (json.JSONDecodeError, FileNotFoundError) as e:
+                print(f"  Error reading JSON for {gt_file}: {e}. Skipping.")
                 continue
-            except Exception as e: # Catch other errors, like from the API after retries
-                print(f"    - An unexpected error occurred for key '{key}': {e}")        
-                continue
-            time.sleep(1.5) # Pace requests to the API to avoid rate-limiting.
 
-    # Save the scores to a CSV file
-    if results:
-        new_results_df = pd.DataFrame(results)
+            # Create a robust chain with the fixing parser and automatic retries
+            # on transient errors like server overload or network issues.
+            chain = (prompt | llm | output_fixing_parser).with_retry(
+                stop_after_attempt=3,
+                wait_exponential_jitter=True,
+                retry_if_exception_type=(groq.APIStatusError, requests.exceptions.RequestException)
+            )
+            
+            # Initialize the retriever components once per evaluation run
+            embeddings = HuggingFaceEmbeddings(model_name=embedding_name)
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+
+            # Loop on the json fields to evaluate
+            for key in json_keys:
+                # Resume Logic: Skip if already evaluated
+                if (gt_file, key) in already_evaluated:
+                    print(f"  - Skipping already evaluated field: {key}")
+                    continue
+
+                print(f"  - Evaluating field: {key}")
+
+                # Prepare the inputs for the prompt
+                ground_truth = gt_json.get(key, "")
+                generated_output = gen_json.get(key, "")
+
+                # Get source spans and extract relevant text
+                source_spans_key = f"{key}_source_spans"
+                source_spans_str = gt_json.get(source_spans_key, "")
+                source_spans = [span.strip() for span in source_spans_str]
+
+                # If source spans are not defined (or refer to the whole document),
+                # the context might be too long. Use RAG to find the most relevant parts.
+                if not source_spans or any(span.lower().strip() == 'document' for span in source_spans):
+                    with open(doc_path, 'r', encoding='utf-8') as f:
+                        full_text = f.read()
+
+                    if len(full_text) > max_context_length:
+                        print(f"    - Context for '{key}' is the full document and is too long ({len(full_text)} chars). Using RAG to find relevant parts.")
+                        
+                        # 1. Create a targeted retrieval query based on the evaluation task
+                        retrieval_query = f"Information about '{key}': {formatting_instructions.get(key, '')}"
+                        
+                        # 2. Split text and create an in-memory retriever
+                        docs = text_splitter.create_documents([full_text])
+                        vector_store = FAISS.from_documents(docs, embeddings)
+                        retriever = vector_store.as_retriever(search_kwargs={"k": top_k}) # Retrieve top_k chunks
+                        
+                        # 3. Retrieve relevant chunks and construct the context
+                        retrieved_docs = retriever.invoke(retrieval_query)
+                        relevant_parts = "\n\n\n\n\n ".join([doc.page_content for doc in retrieved_docs])
+                    else:
+                        relevant_parts = full_text
+                else:
+                    # If specific source spans are provided, use them directly.
+                    relevant_parts = get_relevant_text_sections(doc_path, source_spans)
+
+                # Check that the length of the retrieved relevant parts remains below the maximum allowed number of characters for the context
+                disclaimer = '... [context truncated due to length]'
+                if len(relevant_parts) > max_context_length-len(disclaimer):
+                    relevant_parts = relevant_parts[:max_context_length-len(disclaimer)]+disclaimer
+
+                prompt_input = {
+                    "json_field": key,
+                    "relevant_parts": relevant_parts,
+                    "generated_output": generated_output,
+                    "ground_truth": ground_truth,
+                    "formatting_instructions": formatting_instructions.get(key, ""),
+                    "examples": examples.get(key, ""),
+                    "output_format_instructions": parser.get_format_instructions()
+                }
+
+                try:
+                    # The chain now directly returns a validated JudgeOutput object
+                    evaluation_result = chain.invoke(prompt_input)
+                    evaluation_scores = evaluation_result.scores
+                    for criterion, score in evaluation_scores.items():
+                        new_csv_line = {
+                            'file': gt_file,
+                            'field': key,
+                            'criterion': criterion,
+                            'score': score,
+                            'explanation': evaluation_result.explanations.get(criterion, "")
+                        }
+                        # Write the new line in the csv file
+                        writer.writerow(new_csv_line)
+
+                        # results.append({
+                        #     'file': gt_file,
+                        #     'field': key,
+                        #     'criterion': criterion,
+                        #     'score': score,
+                        #     'explanation': evaluation_result.explanations.get(criterion, "")
+                        # })
+                except OutputParserException as e:
+                    # Catch parsing errors specifically if the LLM fails to produce valid JSON
+                    print(f"    - Error parsing LLM output for key '{key}': {e}")
+                    continue
+                except Exception as e: # Catch other errors, like from the API after retries
+                    print(f"    - An unexpected error occurred for key '{key}': {e}")        
+                    continue
+                time.sleep(1.5) # Pace requests to the API to avoid rate-limiting.
+
+    # Reorder the lines of the CSV file by using the first column entries ('file')
+    reordered_df = pd.read_csv(csv_output_filepath)
+    # Sort by multiple columns to ensure a fully deterministic order
+    reordered_df.sort_values(by=['file', 'field', 'criterion'], inplace=True)
+    reordered_df.to_csv(csv_output_filepath, index=False)
+    print(f"\nLLM-as-a-judge evaluation saved to {csv_output_filepath}")
+
+    # # Save the scores to a CSV file
+    # if results:
+    #     new_results_df = pd.DataFrame(results)
         
-        # Combine with existing results if any
-        if existing_df is not None:
-            final_df = pd.concat([existing_df, new_results_df], ignore_index=True)
-        else:
-            final_df = new_results_df
+    #     # Combine with existing results if any
+    #     if existing_df is not None:
+    #         final_df = pd.concat([existing_df, new_results_df], ignore_index=True)
+    #     else:
+    #         final_df = new_results_df
 
-        os.makedirs(os.path.dirname(csv_output_filepath), exist_ok=True)
-        final_df.to_csv(csv_output_filepath, index=False, encoding='utf-8')
-        print(f"\nLLM-as-a-judge evaluation saved to {csv_output_filepath}")
+    #     os.makedirs(os.path.dirname(csv_output_filepath), exist_ok=True)
+    #     final_df.to_csv(csv_output_filepath, index=False, encoding='utf-8')
+    #     print(f"\nLLM-as-a-judge evaluation saved to {csv_output_filepath}")
+
+    end = time.time()
+    print(f"Script completed in {end-start} seconds.")
 
 
 ### Main function
 if __name__ == '__main__':
 
-    # # Compute BLEU, ROUGE and BertScore metrics
-    # # gt_path = r'.\evaluation\ground_truth'
-    # # gen_path = r'.\evaluation\generated_outputs\gemini-2.5-flash'
-    # output_filepath = r'.\evaluation\metrics\gemini-2.5-flash\metrics.csv'
-    # # compute_metrics(gt_path, gen_path, output_filepath)
+    # Compute BLEU, ROUGE and BertScore metrics
+    gt_path = r'.\evaluation\ground_truth'
+    gen_path = r'.\evaluation\generated_outputs\gemini-2.5-flash'
+    output_filepath = r'.\evaluation\metrics\gemini-2.5-flash\metrics.csv'
+    # compute_metrics(gt_path, gen_path, output_filepath)
 
-    # # Plot boxplots and violin plots of metrics per json field
-    # output_folder_path = r'.\evaluation\plots\gemini-2.5-flash'
-    # plot_metrics(output_filepath, output_folder_path)
+    # Plot boxplots and violin plots of metrics per json field
+    output_folder_path = r'.\evaluation\plots\gemini-2.5-flash'
+    #plot_metrics(output_filepath, output_folder_path)
 
     # Initialize the Groq LLM as the judge
     llm_judge = "llama3-70b-8192"
