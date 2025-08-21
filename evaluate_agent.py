@@ -25,6 +25,7 @@ import time
 import requests
 import groq
 import csv
+import sys
 from pdb import set_trace as st # For debugging purposes
 
 
@@ -370,7 +371,7 @@ def llm_as_a_judge_evaluation(
         csv_output_filepath: str, 
         llm: BaseLanguageModel,
         embedding_name: str="all-MiniLM-L6-v2",
-        max_context_length: int=16000,
+        max_context_length: int=12000,
         chunk_size: int=1500,
         chunk_overlap: int=150,
         top_k: int=5) -> None:
@@ -676,6 +677,10 @@ def llm_as_a_judge_evaluation(
             Diese Bekanntmachung basiert auf dem Abkommen zur Zusammenarbeit im Bereich von Wissenschaft, Forschung und Technologie zwischen Deutschland und Südafrika vom 12. Juni 1996.\n\
             *Expected answer 4:* The participation of companies, especially small and medium enterprises (SME) is particularly welcome."
         }
+    
+    # Initialize the retriever components once per evaluation run
+    embeddings = HuggingFaceEmbeddings(model_name=embedding_name)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
     # Open the csv file of results
     with open(csv_output_filepath, 'w', encoding='utf-8', newline='') as f:
@@ -712,10 +717,6 @@ def llm_as_a_judge_evaluation(
                 wait_exponential_jitter=True,
                 retry_if_exception_type=(groq.APIStatusError, requests.exceptions.RequestException)
             )
-            
-            # Initialize the retriever components once per evaluation run
-            embeddings = HuggingFaceEmbeddings(model_name=embedding_name)
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
             # Loop on the json fields to evaluate
             for key in json_keys:
@@ -802,8 +803,27 @@ def llm_as_a_judge_evaluation(
                     # Catch parsing errors specifically if the LLM fails to produce valid JSON
                     print(f"    - Error parsing LLM output for key '{key}': {e}")
                     continue
+                except groq.RateLimitError as e:
+                    # Check if the error is due to the daily token limit
+                    if "tokens per day (TPD)" in str(e):
+                        print(f"   - Daily token limit reached: {e}")
+                        print("    - Stopping the script.")
+                        # Close the file
+                        f.close()
+                        # Reorder the lines of the CSV file by using the first column entries ('file')
+                        reordered_df = pd.read_csv(csv_output_filepath)
+                        # Sort by multiple columns to ensure a fully deterministic order
+                        reordered_df.sort_values(by=['file', 'field', 'criterion'], inplace=True)
+                        reordered_df.to_csv(csv_output_filepath, index=False)
+                        sys.exit(1)  # Exit the script
+                    else:
+                        # Handle other rate limit errors (e.g., tokens per minute)
+                        print(f"   - A rate limit error occurred for key '{key}': {e}")
+                        print("    - Waiting for 60 seconds before retrying.")
+                        time.sleep(60)
+                        continue
                 except Exception as e: # Catch other errors, like from the API after retries
-                    print(f"    - An unexpected error occurred for key '{key}': {e}")        
+                    print(f"    - An unexpected error occurred for key '{key}': {e}")    
                     continue
                 time.sleep(1.5) # Pace requests to the API to avoid rate-limiting.
 
