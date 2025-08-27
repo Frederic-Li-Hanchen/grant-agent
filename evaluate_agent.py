@@ -19,13 +19,14 @@ from langchain.output_parsers import OutputFixingParser
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
-import tenacity
+#import tenacity
 from langchain_groq import ChatGroq
 import time
 import requests
 import groq
 import csv
 import sys
+import numpy as np
 from pdb import set_trace as st # For debugging purposes
 
 
@@ -792,13 +793,6 @@ def llm_as_a_judge_evaluation(
                         # Write the new line in the csv file
                         writer.writerow(new_csv_line)
 
-                        # results.append({
-                        #     'file': gt_file,
-                        #     'field': key,
-                        #     'criterion': criterion,
-                        #     'score': score,
-                        #     'explanation': evaluation_result.explanations.get(criterion, "")
-                        # })
                 except OutputParserException as e:
                     # Catch parsing errors specifically if the LLM fails to produce valid JSON
                     print(f"    - Error parsing LLM output for key '{key}': {e}")
@@ -834,87 +828,114 @@ def llm_as_a_judge_evaluation(
     reordered_df.to_csv(csv_output_filepath, index=False)
     print(f"\nLLM-as-a-judge evaluation saved to {csv_output_filepath}")
 
-    # # Save the scores to a CSV file
-    # if results:
-    #     new_results_df = pd.DataFrame(results)
-        
-    #     # Combine with existing results if any
-    #     if existing_df is not None:
-    #         final_df = pd.concat([existing_df, new_results_df], ignore_index=True)
-    #     else:
-    #         final_df = new_results_df
-
-    #     os.makedirs(os.path.dirname(csv_output_filepath), exist_ok=True)
-    #     final_df.to_csv(csv_output_filepath, index=False, encoding='utf-8')
-    #     print(f"\nLLM-as-a-judge evaluation saved to {csv_output_filepath}")
-
     end = time.time()
     print(f"Script completed in {end-start} seconds.")
+
+
+### Function to compute the overall similarity score using the criteria scores assigned by the LLM judge
+# Input arguments:
+# - [str] judge_scores_csv_path: path to the CSV file containing scores and explanations assigned by the LLM judge
+# - [str] output_csv_path: path to the CSV file where the overall scores should be saved
+# - [List[float]] weight_list: list of weights to assign to each of the 5 criteria assigned by the LLM judge. The sum of its elements must be equal to 1.
+def compute_overall_similarity_score(judge_scores_csv_path: str, output_csv_path: str, weight_list: List[float]=[0.35, 0.35, 0.1, 0.1, 0.1]) -> None:
+
+    # Load the CSV file of scores assigned by the judge
+    try:
+        llm_judge_scores = pd.read_csv(judge_scores_csv_path)
+    except FileNotFoundError:
+        print(f"Error: Input file not found at {judge_scores_csv_path}")
+        return
+    print('Processing the LLM judge scores in file '+judge_scores_csv_path+'...')
+
+    # Define criteria and their corresponding weights
+    criteria = ['correctness', 'completeness', 'clarity', 'conciseness', 'adherence']
+    weights = dict(zip(criteria, weight_list))
+    
+    # Check for required columns in the input CSV
+    required_cols = ['file', 'field', 'criterion', 'score']
+    if not all(col in llm_judge_scores.columns for col in required_cols):
+        missing = [col for col in required_cols if col not in llm_judge_scores.columns]
+        print(f"Error: Input CSV is missing required columns: {missing}")
+        return
+    
+    # Pivot the table to transform data from 'long' to 'wide' format. This creates columns for each criterion for each file-field pair.
+    # If multiple scores exist for the same file-field-criterion combination, they will be averaged by default.
+    print("Reshaping data from long to wide format ...")
+    results = llm_judge_scores.pivot_table(
+        index=['file', 'field'],
+        columns='criterion',
+        values='score',
+        aggfunc='mean'
+    ).reset_index()
+
+    # Ensure all expected criteria columns exist, filling missing ones with NaN
+    for criterion in criteria:
+        if criterion not in results.columns:
+            results[criterion] = np.nan
+            print(f"Warning: Criterion '{criterion}' not found in input data. Its column will be empty.")
+
+    # Convert score columns to numeric, coercing errors to NaN
+    for criterion in criteria:
+        results[criterion] = pd.to_numeric(results[criterion], errors='coerce')
+
+    # Calculate the weighted average.
+    # Pandas automatically handles NaNs: if any score in a row is NaN, the resulting overall_similarity_score for that row will also be NaN.
+    # This fulfills the requirement to leave the overall score empty if any criterion score is missing.
+    print("Calculating overall similarity scores...")
+    weighted_sum = sum(results[c] * weights[c] for c in criteria if c in results.columns)
+    total_weight = sum(weights.values())
+
+    if total_weight > 0:
+        results['overall_similarity_score'] = weighted_sum / total_weight
+    else:
+        results['overall_similarity_score'] = np.nan
+    
+    # Reorder columns for the final output file
+    final_columns = ['file', 'field'] + criteria + ['overall_similarity_score']
+    results = results[final_columns]
+
+    # Save the results dataframe to the output path
+    print(f"Saving results to {output_csv_path}...")
+    os.makedirs(os.path.dirname(output_csv_path), exist_ok=True)
+    results.to_csv(output_csv_path, index=False, encoding='utf-8')
+    print("Processing complete.")
 
 
 ### Main function
 if __name__ == '__main__':
 
-    # Compute BLEU, ROUGE and BertScore metrics
-    gt_path = r'.\evaluation\ground_truth'
-    gen_path = r'.\evaluation\generated_outputs\gemini-2.5-flash'
-    output_filepath = r'.\evaluation\metrics\gemini-2.5-flash\metrics.csv'
-    # compute_metrics(gt_path, gen_path, output_filepath)
+    # # Compute BLEU, ROUGE and BertScore metrics
+    # gt_path = r'.\evaluation\ground_truth'
+    # gen_path = r'.\evaluation\generated_outputs\gemini-2.5-flash'
+    # output_filepath = r'.\evaluation\metrics\gemini-2.5-flash\metrics.csv'
+    # # compute_metrics(gt_path, gen_path, output_filepath)
 
-    # Plot boxplots and violin plots of metrics per json field
-    output_folder_path = r'.\evaluation\plots\gemini-2.5-flash'
-    #plot_metrics(output_filepath, output_folder_path)
+    # # Plot boxplots and violin plots of metrics per json field
+    # output_folder_path = r'.\evaluation\plots\gemini-2.5-flash'
+    # #plot_metrics(output_filepath, output_folder_path)
 
-    # Initialize the Groq LLM as the judge
+    # # Initialize the Groq LLM as the judge
     llm_judge = "llama3-70b-8192"
-    load_dotenv()
-    groq_api_key = os.getenv("GROQ_API_KEY")
-    if not groq_api_key:
-        raise ValueError("GROQ_API_KEY not found among the environment variables defined in .env")
-    print("Evaluating with Llama 3 70B on Groq...")
-    groq_llm = ChatGroq(
-        model=llm_judge,
-        temperature=0.1, 
-    )
-
-    llm_as_a_judge_evaluation(
-        gt_path=r'.\evaluation\ground_truth',
-        gen_path=r'.\evaluation\generated_outputs\gemini-2.5-flash',
-        text_path=r'.\evaluation\data',
-        csv_output_filepath=r'.\evaluation\llm_as_judge\gemini-2.5-flash_judged_by_'+llm_judge+'.csv',
-        llm=groq_llm
-    )
-
-    # # Usage of LLM as a judge 
     # load_dotenv()
-    # # --- Example 1: Using OpenAI's GPT-4o ---
-    # print("Evaluating with GPT-4o...")
-    # openai_llm = ChatOpenAI(
-    #     model="gpt-4o", 
+    # groq_api_key = os.getenv("GROQ_API_KEY")
+    # if not groq_api_key:
+    #     raise ValueError("GROQ_API_KEY not found among the environment variables defined in .env")
+    # print("Evaluating with Llama 3 70B on Groq...")
+    # groq_llm = ChatGroq(
+    #     model=llm_judge,
     #     temperature=0.1, 
-    #     openai_api_key=os.getenv("OPENAI_API_KEY")
     # )
+
+    llm_score_csv_path = r'.\evaluation\llm_as_judge\gemini-2.5-flash_judged_by_'+llm_judge+'.csv'
 
     # llm_as_a_judge_evaluation(
-    #     gt_path="path/to/your/ground_truth_data",
-    #     gen_path="path/to/your/generated_data",
-    #     output_filepath="results_openai.csv",
-    #     llm=openai_llm
+    #     gt_path=r'.\evaluation\ground_truth',
+    #     gen_path=r'.\evaluation\generated_outputs\gemini-2.5-flash',
+    #     text_path=r'.\evaluation\data',
+    #     csv_output_filepath=llm_score_csv_path,
+    #     llm=groq_llm
     # )
 
-    # # --- Example 2: Using a local model with LlamaCpp ---
-    # print("Evaluating with LlamaCpp...")
-    # # Make sure you have llama-cpp-python installed and a model file downloaded
-    # llamacpp_llm = ChatLlamaCpp(
-    #     model_path="/path/to/your/local-model.gguf",
-    #     temperature=0.1,
-    #     n_ctx=2048,
-    #     # Add other necessary parameters for LlamaCpp
-    # )
-
-    # llm_as_a_judge_evaluation(
-    #     gt_path="path/to/your/ground_truth_data",
-    #     gen_path="path/to/your/generated_data",
-    #     output_filepath="results_llamacpp.csv",
-    #     llm=llamacpp_llm
-    # )
+    # Compute the overall LLM judge scores for each file and save them in a csv file
+    overall_scores_csv_path = r'.\evaluation\llm_as_judge\gemini-2.5-flash_judged_by_'+llm_judge+'_overall_scores.csv'
+    compute_overall_similarity_score(judge_scores_csv_path=llm_score_csv_path, output_csv_path=overall_scores_csv_path, weight_list=[0.35, 0.35, 0.1, 0.1, 0.1])
