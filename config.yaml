@@ -1,0 +1,58 @@
+# ===========================
+# === Main logic switches ===
+# ===========================
+run_steps:
+  build_database: false # NOTE: not implemented yet
+  check_database_quality: false # NOTE: not implemented yet
+  create_ground_truth: false # NOTE: not implemented yet
+  run_summarisation_agent: false # NOTE: not implemented yet
+  compute_traditional_metrics: false
+  plot_traditional_metrics: false
+  run_llm_as_judge: false
+  compute_overall_llm_judge_scores: true
+
+# ===========================
+# === Reusable variables ===
+# ===========================
+vars:
+  agent_model: &agent_model 'gemini-2.5-flash'
+  llm_judge: &llm_judge 'llama3-70b-8192'
+  
+# --- Configuration for each step ---
+# TODO: complete with the other steps later on
+
+# =================================
+# === Agent Evaluation Settings ===
+# =================================
+evaluation_shared_paths:
+  gt_path: &gt_path './evaluation/ground_truth' # Path to the folder containing the json files with the ground truth
+  gen_path: &gen_path './evaluation/generated_outputs/{agent_model}' # Path to the folder containing the json files with the agent generated information
+  traditional_metrics_csv_file: &traditional_metrics_csv_path './evaluation/metrics/{agent_model}/metrics.csv' # Path to the CSV file where to save the BLEU, ROUGE and BertScore evaluation metrics
+  llm_scores_csv_filepath: &llm_scores_csv_filepath './evaluation/llm_as_judge/{agent_model}_judged_by_{llm_judge}.csv' # Path for LLM as judge scores
+
+compute_traditional_metrics:
+  gt_path: *gt_path
+  gen_path: *gen_path
+  output_filepath: *traditional_metrics_csv_path
+
+plot_traditional_metrics:
+  csv_filepath: *traditional_metrics_csv_path
+  output_folder_path: './evaluation/plots/{agent_model}' # Path to the folder where boxplots and violin plots of the evaluation metrics should be saved
+
+run_llm_as_judge:
+  model: *llm_judge # Name of the LLM to be used as judge
+  temperature: 0.1 # Temprature parameter of the LLM judge
+  text_path:  './evaluation/data' # Path to the folder that contains the text files of the Bekanntmachungen to be evaluated
+  gt_path: *gt_path
+  gen_path: *gen_path
+  csv_output_filepath: *llm_scores_csv_filepath
+
+compute_overall_llm_judge_scores:
+  judge_scores_csv_path: *llm_scores_csv_filepath
+  scoring_weights:
+    correctness: 0.35
+    completness: 0.35
+    clarity: 0.1
+    conciseness: 0.1
+    adherence: 0.1
+  output_csv_path: './evaluation/llm_as_judge/{agent_model}_judged_by_{llm_judge}_overall_scores.csv'
