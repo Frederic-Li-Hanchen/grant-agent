@@ -27,6 +27,7 @@ import groq
 import csv
 import sys
 import numpy as np
+from utils import spearman_corr_custom
 from utils import load_config_from_yaml
 from pdb import set_trace as st # For debugging purposes
 
@@ -691,6 +692,117 @@ def compute_overall_similarity_score(judge_scores_csv_path: str, output_csv_path
     print("Processing complete.")
 
 
+### Function to compute correlations between LLM judge and human scores
+# Input arguments:
+# - [str] llm_judge_scores_csv_path: path to the CSV file containing the scores assigned by the LLM judge
+# - [str] human_scores_csv_path: path to the CSV file containing the scores assigned by the human
+# - [str] output_csv_path: path to the CSV file containing correlation scores and p-values to be saved
+def compute_llm_judge_human_correlations(llm_judge_scores_csv_path: str, human_scores_csv_path: str, output_csv_path: str) -> None:
+
+    # Load the CSV files of human and LLM judge scores
+    with open(llm_judge_scores_csv_path, 'r', encoding='utf-8') as f:
+        llm_judge_scores = pd.read_csv(f)
+    with open(human_scores_csv_path, 'r', encoding='utf-8') as f:
+        human_scores = pd.read_csv(f)
+    print("Calculating Spearman's Rank Correlation Coefficients between the human scores from file "+human_scores_csv_path+" and the LLM judge scores from file "+llm_judge_scores_csv_path+"...")
+
+    # Identify the set of Bekanntmachungen that received both human and LLM annotations
+    llm_evaluated_files = set(llm_judge_scores['file'])
+    human_evaluated_files = set(human_scores['file'])
+    common_files = llm_evaluated_files.intersection(human_evaluated_files)
+    print("%d files with both human and LLM annotations found." % len(common_files))
+
+    # Filter dataframes to only include common files
+    human_scores_common = human_scores[human_scores['file'].isin(common_files)]
+    llm_judge_scores_common = llm_judge_scores[llm_judge_scores['file'].isin(common_files)]
+
+    # Merge the two dataframes to align scores
+    merged_scores = pd.merge(
+        human_scores_common,
+        llm_judge_scores_common,
+        on=['file', 'field', 'criterion'],
+        suffixes=('_human', '_llm')
+    )
+    
+    # Ensure scores are integers
+    merged_scores['score_human'] = merged_scores['score_human'].astype(int)
+    merged_scores['score_llm'] = merged_scores['score_llm'].astype(int)
+
+    print("Computing correlations ...")
+
+    # To preserve the original evaluation order, we can use Categorical types
+    fields_to_evaluate = ['objective', 'inclusion_criteria', 'exclusion_criteria', 'deadline', 'max_funding', 'max_duration', 'procedure', 'contact', 'misc']
+    criteria = ['correctness', 'completeness', 'clarity', 'conciseness', 'adherence']
+    
+    merged_scores = merged_scores[
+        merged_scores['field'].isin(fields_to_evaluate) & 
+        merged_scores['criterion'].isin(criteria)
+    ]
+    
+    merged_scores['field'] = pd.Categorical(merged_scores['field'], categories=fields_to_evaluate, ordered=True)
+    merged_scores['criterion'] = pd.Categorical(merged_scores['criterion'], categories=criteria, ordered=True)
+
+    # Group by field and criterion and apply the correlation function
+    result_frame = merged_scores.groupby(['field', 'criterion'], sort=False, observed=False).apply(spearman_corr_custom).reset_index()
+
+    # Save the resulting pandas frame to CSV
+    result_frame.to_csv(output_csv_path, index=False)
+    print("Correlations saved to "+output_csv_path+".")
+
+
+# ### Function to compute correlations between LLM judge and human scores
+# def compute_llm_judge_human_correlations(llm_judge_scores_csv_path: str, human_scores_csv_path: str, output_csv_path: str) -> None:
+
+#     # Load the CSV files of human and LLM judge scores
+#     with open(llm_judge_scores_csv_path, 'r', encoding='utf-8') as f:
+#         llm_judge_scores = pd.read_csv(f)
+#     with open(human_scores_csv_path, 'r', encoding='utf-8') as f:
+#         human_scores = pd.read_csv(f)
+#     print("Calculating Spearman's Rank Correlation Coefficients between the human scores from file "+human_scores_csv_path+" and the LLM judge scores from file "+llm_judge_scores_csv_path+"...")
+
+#     # Identify the set of Bekanntmachungen that received both human and LLM annotations
+#     llm_evaluated_files = set(llm_judge_scores['file'])
+#     human_evaluated_files = set(human_scores['file'])
+#     common_files = llm_evaluated_files.intersection(human_evaluated_files)
+#     print("%d files with both human and LLM annotations found." % len(common_files))
+
+#     # Create a dictionary to store lists of scores, with keys 'human' and 'llm'. 
+#     # The two values are dictionaries with keys being fields to evaluate (e.g. 'objective', 'inclusion_criteria', etc.).
+#     # Each field value is a dictionary with keys being the 5 criteria.
+#     # Each criteria value is a list of size number of Bekanntmachungen.
+#     scores = {'human': {}, 'llm': {}}
+#     fields_to_evaluate = ['objective', 'inclusion_criteria', 'exclusion_criteria', 'deadline', 'max_funding', 'max_duration', 'procedure', 'contact', 'misc']
+#     criteria = ['correctness', 'completeness', 'clarity', 'conciseness', 'adherence']
+    
+#     for field in fields_to_evaluate:
+#         scores['human'][field] = {}
+#         scores['llm'][field] = {}
+#         for criterion in criteria:
+#             human_scores_list = []
+#             llm_scores_list = []
+#             for file in common_files:
+#                 human_scores_list.append(int(human_scores[human_scores['file']==file][human_scores['field']==field][human_scores['criterion']==criterion]['score'].iloc[0]))
+#                 llm_scores_list.append(int(llm_judge_scores[llm_judge_scores['file']==file][llm_judge_scores['field']==field][llm_judge_scores['criterion']==criterion]['score'].iloc[0]))
+#             scores['human'][field][criterion] = human_scores_list
+#             scores['llm'][field][criterion] = llm_scores_list
+                
+#     # Loop on the combinations of field+criteria to compute the Spearmann's rank correlation coefficient and save them in a panda data frame
+#     records = []
+
+#     print("Computing correlations ...")
+#     for field in fields_to_evaluate:
+#         for criterion in criteria:
+#             human_scores_list = scores['human'][field][criterion]
+#             llm_scores_list = scores['llm'][field][criterion]
+#             correlation, p_value = spearmanr(human_scores_list, llm_scores_list)
+#             records.append({'field': field, 'criterion': criterion, 'spearman_correlation': correlation, 'p_value': p_value})
+
+#     # Save the resulting panda frame to CSV
+#     result_frame = pd.DataFrame(records)
+#     result_frame.to_csv(output_csv_path, index=False)
+#     print("Correlations saved to "+output_csv_path+".")
+
+
 ### Main function
 if __name__ == '__main__':
 
@@ -759,4 +871,13 @@ if __name__ == '__main__':
             judge_scores_csv_path=overall_judge_scores_parameters.get('judge_scores_csv_path'),
             output_csv_path=overall_judge_scores_parameters.get('output_csv_path'),
             weight_list=weight_list
+        )
+
+    # Compute the Spearman's Rank Correlation Coefficient between human and LLM judge scores
+    if run_steps.get('compute_spearman_correlations'):
+        overall_correlation_parameters = config.get('compute_spearman_correlations', {})
+        compute_llm_judge_human_correlations(
+            llm_judge_scores_csv_path=overall_correlation_parameters.get('llm_judge_scores_csv_path'),
+            human_scores_csv_path=overall_correlation_parameters.get('human_scores_csv_path'),
+            output_csv_path=overall_correlation_parameters.get('output_csv_path')
         )

@@ -1,5 +1,8 @@
 import yaml
 from typing import Dict, Any, List, Tuple
+from scipy.stats import spearmanr
+import pandas as pd
+import numpy as np
 from pdb import set_trace as st
 
 ### Helper function to format strings in a config dictionary
@@ -29,6 +32,9 @@ def format_config(config: Dict[str, Any]) -> Dict[str, Any]:
         ('run_llm_as_judge', 'csv_output_filepath'),
         ('compute_overall_llm_judge_scores', 'judge_scores_csv_path'),
         ('compute_overall_llm_judge_scores', 'output_csv_path'),
+        ('compute_spearman_correlations', 'llm_judge_scores_csv_path'),
+        ('compute_spearman_correlations', 'human_scores_csv_path'),
+        ('compute_spearman_correlations', 'output_csv_path'),
     ]
 
     for path_keys in paths_to_format:
@@ -62,3 +68,43 @@ def load_config_from_yaml(config_path: str) -> Dict[str, Any]:
     # Get the variables and format the rest of the configuration
     formatted_config = format_config(config)
     return formatted_config
+
+
+### Function to compute a custom Spearman's correlation coefficient that handles the cases where one or both inputs are constant.
+### Chosen convention: (rho, p) are (0,1) or (1,0) if respectively one or both input(s) are constant 
+# Input argument:
+# - [pd.DataFrame] group: a DataFrame group with 'score_human' and 'score_llm' columns
+# Output argument:
+# - [pd.Series]: a pandas series containing the Spearman correlation and p values.
+def spearman_corr_custom(group: pd.DataFrame) -> pd.Series:
+    """
+    Computes the Spearman correlation for a group, handling cases where one
+    or both inputs are constant.
+
+    Args:
+        group (pd.DataFrame): A DataFrame group with 'score_human' and
+                              'score_llm' columns.
+
+    Returns:
+        pd.Series: A series containing the 'spearman_correlation' and 'p_value'.
+    """
+    human_scores = group['score_human'].to_numpy()
+    llm_scores = group['score_llm'].to_numpy()
+
+    # Check for constant series
+    is_human_constant = len(np.unique(human_scores)) == 1
+    is_llm_constant = len(np.unique(llm_scores)) == 1
+
+    if is_human_constant and is_llm_constant:
+        # Both are constant and in perfect agreement on the (lack of) ranking.
+        # Define this as a perfect correlation.
+        return pd.Series({'spearman_correlation': 1.0, 'p_value': 0.0})
+    elif is_human_constant or is_llm_constant:
+        # One series is constant, the other is not. Correlation is undefined.
+        # A reasonable convention is to return 0, as there can be no
+        # co-variation if one variable does not vary.
+        return pd.Series({'spearman_correlation': 0.0, 'p_value': 1.0})
+    else:
+        # Both series vary, calculate the standard Spearman correlation.
+        correlation, p_value = spearmanr(human_scores, llm_scores)
+        return pd.Series({'spearman_correlation': correlation, 'p_value': p_value})
