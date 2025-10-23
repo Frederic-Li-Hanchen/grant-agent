@@ -5,6 +5,7 @@ debug_data/
 tmp_data/
 evaluation/
 ground_truth/
+supervised_fine_tuning/
 .env
 .venv
 __pycache__/

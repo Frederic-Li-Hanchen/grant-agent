@@ -6,7 +6,17 @@ import os
 from time import sleep, time
 import random  # For random sleep intervals
 from typing import Optional
+from utils import load_config_from_yaml
 from pdb import set_trace as st
+from dotenv import load_dotenv
+from langchain_community.vectorstores import DocArrayInMemorySearch
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_community.document_loaders import PyPDFLoader, UnstructuredPDFLoader, TextLoader
+from typing import List, Dict, Any
+import json
+import sys
+
 
 ### Helper function that checks if a webpage exists
 # Input:
@@ -110,6 +120,11 @@ def extract_main_text_via_url(url: str) -> str:
 
     if not main_content_container:
         return "Could not find any content to extract from this page."
+
+    # Type guard to ensure we have a Tag object before calling find_all
+    if not isinstance(main_content_container, BeautifulSoup.Tag):
+        print(f"  Warning: Expected a Tag for main content but got {type(main_content_container)}. Extracting its text directly.")
+        return main_content_container.get_text(strip=True)
 
     # Iterate over relevant block-level elements (paragraphs, headings, lists) to apply heuristics
     extracted_lines = []
@@ -333,38 +348,222 @@ def scrape_bekanntmachungen_content(
     print(f"Total execution time: {end - start:.2f} seconds.")
 
 
+### Script that builds the training set for supervised fine-tuning of the LLM
+# Input:
+# - [str] doc_folder_path: path to the folder containing the source documents (currently either PDF or text)
+# - [str] ground_truth_filepath: path to the json file containing the ground truth information
+# - [str] output_filepath: path where the resulting json file will be saved.
+# - [str] embedding_model_name: name of the embedding model to be used for the information extraction
+# - [int] chunk_size: size of the text chunks to be created from the document
+# - [int] chunk_overlap: overlap between the text chunks 
+# - [int] top_k_retrieval: number of top relevant chunks to retrieve for each query
+# Output:
+# - None
+def generate_training_dataset_prompts(
+    doc_folder_path: str,
+    ground_truth_filepath: str,
+    output_filepath: str,
+    prompts_filepath: str,
+    embedding_model_name: str = "models/embedding-001",
+    chunk_size: int = 4000,
+    chunk_overlap: int = 200,
+    #max_context_length: int = 4000,  # Max context length for the prompt
+    top_k_retrieval: int = 4  # Number of chunks to retrieve, similar to default in RetrievalQA
+) -> None:
+    """
+    Generates a JSON file containing prompts for training a model,
+    mimicking the RAG prompt construction of the grant summarisation agent.
+
+    Each entry in the output JSON will have the format:
+    {
+        "file_name": "path/to/document.txt",
+        "field": "objective",
+        "prompt": "Full prompt text including retrieved context and query",
+        "answer": "Answer retrieved from the ground truth files"
+    }
+
+    Args:
+        doc_paths (List[str]): A list of absolute paths to the document files (PDF or text).
+        output_filepath (str): The absolute path to the JSON file where the dataset will be saved.
+        prompts_filepath (str): The absolute path to the JSON file where the prompts are stored.
+        embedding_model_name (str): Name of the embedding model to use (e.g., "models/embedding-001").
+        chunk_size (int): Size of the text chunks for document splitting.
+        chunk_overlap (int): Overlap between text chunks.
+        max_context_length (int): Maximum character length for the context included in the prompt.
+                                  This simulates truncation if the retrieved context is too long.
+        top_k_retrieval (int): Number of top relevant chunks to retrieve for each query.
+    """
+    start_time = time()
+    doc_paths = [os.path.join(doc_folder_path, doc_name) for doc_name in os.listdir(doc_folder_path) if doc_name.endswith('.txt') or doc_name.endswith('.pdf')]
+    training_data_entries = []
+
+    # Initialise embedding model and splitter
+    load_dotenv()
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    if gemini_api_key is None:
+        raise ValueError("GEMINI_API_KEY not found among the environment variables defined in .env")
+    os.environ['GOOGLE_API_KEY'] = gemini_api_key
+
+    embeddings = GoogleGenerativeAIEmbeddings(model=embedding_model_name)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+
+    # Load the base prompts for each field
+    with open(prompts_filepath, 'r', encoding='utf-8') as f:
+        queries = json.load(f)
+
+    # queries = {
+    #     "objective": objective_query,
+    #     "inclusion_criteria": inclusion_query,
+    #     "exclusion_criteria": exclusion_query,
+    #     "deadline": deadline_query,
+    #     "max_funding": max_funding_query,
+    #     "max_duration": max_duration_query,
+    #     "procedure": procedure_query,
+    #     "contact": contact_query,
+    #     "misc": misc_query,
+    # }
+
+    # List the ground truth files
+    ground_truth_file_list = [e for e in os.listdir(ground_truth_filepath) if ".json" in e]
+
+    for doc_path in doc_paths:
+        print(f"Processing document: {doc_path}")
+
+        # Load the document
+        if doc_path.endswith('.pdf'):
+            loader = PyPDFLoader(doc_path)
+        elif doc_path.endswith('.txt'):
+            loader = TextLoader(doc_path, encoding='utf-8')
+        else:
+            print(f"Skipping {doc_path}: Unsupported file type.")
+            continue
+
+        # Retrieve and load the corresponding ground truth file
+        base_name = os.path.basename(doc_path).rsplit('.', 1)[0]
+        ground_truth_file = [e for e in ground_truth_file_list if base_name in e][0]
+        if ground_truth_file:
+            with open(os.path.join(ground_truth_filepath, ground_truth_file), 'r', encoding='utf-8') as f:
+                ground_truth = json.load(f)
+        else:
+            print(f"  Warning: No ground truth file found for {doc_path}.")
+            ground_truth = {}
+
+        try:
+            documents = loader.load()
+            split_docs = text_splitter.split_documents(documents)
+            if not split_docs:
+                print(f"No content extracted from {doc_path}. Skipping.")
+                continue
+
+            index = DocArrayInMemorySearch.from_documents(split_docs, embeddings)
+            retriever = index.as_retriever(search_kwargs={"k": top_k_retrieval})
+
+            for field, query_string in queries.items():
+                # Retrieve relevant chunks
+                retrieved_docs = retriever.invoke(query_string)
+                relevant_parts = "\n\n".join([doc.page_content for doc in retrieved_docs])
+
+                # # Apply context truncation logic, similar to evaluate_agent.py
+                # NOTE: removed for the dataset generation to keep as much context as possible
+                # disclaimer = '... [context truncated due to length]'
+                # if len(relevant_parts) > max_context_length - len(disclaimer):
+                #     relevant_parts = relevant_parts[:max_context_length - len(disclaimer)] + disclaimer
+
+                # Construct the full prompt as it would be sent to the LLM by RetrievalQA
+                # This template is a common default for RetrievalQA with chain_type="stuff".
+                full_prompt_template = (
+                    "Use the following pieces of context to answer the user's question.\n"
+                    "If you don't know the answer, just say that you don't know, don't try to make up an answer.\n"
+                    "----------------\n"
+                    "{context}\n"
+                    "----------------\n"
+                    "Question: {question}\n"
+                )
+                final_prompt = full_prompt_template.format(context=relevant_parts, question=query_string)
+                corresponding_ground_truth = ground_truth.get(field, "")
+
+                training_data_entries.append({
+                    "file_name": doc_path,
+                    "field": field,
+                    "prompt": final_prompt,
+                    "answer": corresponding_ground_truth 
+                })
+        except Exception as e:
+            print(f"An error occurred while processing {doc_path}: {e}")
+            continue
+
+    # Save the generated dataset to a JSON file
+    os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
+    with open(output_filepath, 'w', encoding='utf-8') as f:
+        json.dump(training_data_entries, f, indent=4, ensure_ascii=False)
+
+    end_time = time()
+    print(f"Generated training dataset prompts in {end_time - start_time:.2f} seconds.")
+    print(f"Saved {len(training_data_entries)} entries to {output_filepath}")
+
+
 ### Main function
 if __name__ == "__main__":
 
-    ### Meta parameters
-    bmbf_base_url = "https://www.bmbf.de" # Base URL of the BMBF website
-    bmbf_search_url = "https://www.bmbf.de/SiteGlobals/Forms/Suche/Bekanntmachungsuche/Bekanntmachungsuche_Formular.html?resourceId=1051612&pageLocale=de&input_=917290&gtp=1051594_list%253D1&resultsPerPage=50" # URL of the page listing Bekanntmachungen
-    url_file = './meta_data/bekanntmachung_links.txt' # File
-    output_dir = './data/' # Directory where the extracted text files will be saved
-    min_delay_seconds = 1 # Minimum and maximum delay in seconds between requests not to overload the server
-    max_delay_seconds = 1.5
-    log_file = './meta_data/failed_content_urls.txt' # File where logs of failed URLs will be saved
-    log_file2 = './meta_data/failed_content_urls2.txt' # File where logs of failed URLs will be saved (when running again the script onto the log files)
+    ### Load the YAML config file and main logic
+    try:
+        config = load_config_from_yaml(r'./config.yaml')
+    except:
+        print("ERROR: YAML config file './config.yaml' not found!")
+        sys.exit(1)
 
-    ### Building the list of Bekanntmachung links
-    # Ensure the output directory exists
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-        print(f"Created output directory: {output_dir}")
-    
-    # Get the links
-    bekanntmachung_urls = get_bekanntmachung_links(bmbf_base_url, bmbf_search_url)
-    print(f"Found {len(bekanntmachung_urls)} unique Bekanntmachung links.")
-    # Save the list of links to a text file
-    with open(url_file, 'w', encoding='utf-8') as f:
-        for url in bekanntmachung_urls:
-            f.write(url + '\n')
+    run_steps = config.get('run_steps', {})
 
-    ### Retrive the contents of each Bekanntmachung and save them in text format
-    scrape_bekanntmachungen_content(url_file, output_dir, min_delay_seconds=min_delay_seconds, max_delay_seconds=max_delay_seconds, log_file=log_file)
+    ### Build the database of Bekanntmachungen
+    if run_steps.get('build_database', False):
+        print("\n--- Building the Bekanntmachungen database ---")
+        parameters = config.get('build_database',{})
 
-    ### NOTE: Debugging purposes
-    #scrape_bekanntmachungen_content(url_file, output_dir='./data_debug/', min_delay_seconds=min_delay_seconds, max_delay_seconds=max_delay_seconds, log_file=log_file, debug=20)
+        # Building the list of Bekanntmachung links
+        output_dir = parameters.get('output_dir', './data/')
+        # Ensure the output directory exists
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            print(f"Created output directory: {output_dir}")
 
-    ### Retry failed URLs from the log file
-    scrape_bekanntmachungen_content(log_file, output_dir, min_delay_seconds=min_delay_seconds, max_delay_seconds=max_delay_seconds, log_file=log_file2)
+        # Get the links
+        bekanntmachung_urls = get_bekanntmachung_links(parameters.get('bmbf_base_url'), parameters.get('bmbf_search_url'))
+        print(f"Found {len(bekanntmachung_urls)} unique Bekanntmachung links.")
+        # Save the list of links to a text file
+        url_file = parameters.get('url_file')
+        with open(url_file, 'w', encoding='utf-8') as f:
+            for url in bekanntmachung_urls:
+                f.write(url + '\n')
+
+        # Retrive the contents of each Bekanntmachung and save them in text format
+        scrape_bekanntmachungen_content(
+            url_file, 
+            output_dir, 
+            min_delay_seconds=parameters.get('min_delay_seconds'), 
+            max_delay_seconds=parameters.get('max_delay_seconds'), 
+            log_file=parameters.get('log_file')
+        )
+
+        # NOTE: Debugging purposes
+        # log_file = './meta_data/failed_content_urls.txt' # File where logs of failed URLs will be saved
+        # log_file2 = './meta_data/failed_content_urls2.txt' # File where logs of failed URLs will be saved (when running again the script onto the log files)
+        #scrape_bekanntmachungen_content(url_file, output_dir='./data_debug/', min_delay_seconds=min_delay_seconds, max_delay_seconds=max_delay_seconds, log_file=log_file, debug=20)
+        # #Retry failed URLs from the log file
+        #scrape_bekanntmachungen_content(log_file, output_dir, min_delay_seconds=min_delay_seconds, max_delay_seconds=max_delay_seconds, log_file=log_file2)
+
+    ### Generate the ground truth database for supervised fine-tuning
+    if run_steps.get('build_sft_dataset', False):
+        print("\n--- Generating training dataset prompts ---")
+        parameters = config.get('build_sft_dataset',{})
+        
+        generate_training_dataset_prompts(
+            doc_folder_path=parameters.get('data_folder'),
+            ground_truth_filepath=parameters.get('ground_truth_filepath'),
+            output_filepath=parameters.get('output_filepath'),
+            prompts_filepath=parameters.get('prompts_filepath'),
+            embedding_model_name=parameters.get('embedding_model_name','models/embedding-001'),
+            chunk_size=parameters.get('chunk_size',4000),
+            chunk_overlap=parameters.get('chunk_overlap',200),
+            #max_context_length=8000,
+            top_k_retrieval=parameters.get('top_k_retrieval',4)
+        )
