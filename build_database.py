@@ -16,6 +16,7 @@ from langchain_community.document_loaders import PyPDFLoader, UnstructuredPDFLoa
 from typing import List, Dict, Any
 import json
 import sys
+import pandas as pd
 
 
 ### Helper function that checks if a webpage exists
@@ -348,7 +349,7 @@ def scrape_bekanntmachungen_content(
     print(f"Total execution time: {end - start:.2f} seconds.")
 
 
-### Script that builds the training set for supervised fine-tuning of the LLM
+### Function that builds the training set for supervised fine-tuning of the LLM
 # Input:
 # - [str] doc_folder_path: path to the folder containing the source documents (currently either PDF or text)
 # - [str] ground_truth_filepath: path to the json file containing the ground truth information
@@ -502,6 +503,50 @@ def generate_training_dataset_prompts(
     print(f"Saved {len(training_data_entries)} entries to {output_filepath}")
 
 
+### Function that splits the saved dataset into training and testing sets and converts them into the proper HuggingFace data format
+# Input:
+# - [str] database_path: path to the json file containing the data
+# - [str] training_set_path: path to where to save the CSV file containing the training set
+# - [str] testing_set_path: path to where to save the CSV file containing the testing set
+# - [float] train_proportion: percentage of the samples assigend to the training set
+# - [int] random_seed: random seed for random splitting between the training and testing sets
+# Output:
+# - None
+def split_train_test(database_path: str, training_set_path: str, testing_set_path: str, train_proportion: float = 0.7, random_seed: int = 42):
+
+    # Load the database
+    with open(database_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    # Retrieve the total list of original files
+    filename_list = list(set([e["file_name"] for e in data]))
+
+    # Randomly split the files between training and testing sets 
+    random.seed(random_seed)
+    random.shuffle(filename_list)
+    train_size = int(len(filename_list) * train_proportion)
+    train_files = filename_list[:train_size]
+    test_files = filename_list[train_size:]
+    train_samples = [e for e in data if e["file_name"] in train_files]
+    test_samples = [e for e in data if e["file_name"] in test_files]
+
+    # Format both training and testing sets according to the HuggingFace expected formats
+    # The samples should be in a CSV file with columns ["file_path", "field", "text"]
+    # The "text" field should follow the format "human: sample['prompt'] \n bot: sample['answer']"
+    train_frame = pd.DataFrame(columns=["file_path", "field", "text"])
+    for idx, sample in enumerate(train_samples):
+        new_text = f"human: {sample['prompt']} \n bot: {sample['answer']}"
+        train_frame.loc[idx] = {"file_path": sample["file_name"], "field": sample["field"], "text": new_text}
+    test_frame = pd.DataFrame(columns=["file_path", "field", "text"])
+    for idx, sample in enumerate(test_samples):
+        new_text = f"human: {sample['prompt']} \n bot: {sample['answer']}"
+        test_frame.loc[idx] = {"file_path": sample["file_name"], "field": sample["field"], "text": new_text}
+
+    # Save both training and testing sets in CSV formats
+    train_frame.to_csv(training_set_path, index=False)
+    test_frame.to_csv(testing_set_path, index=False)
+
+
 ### Main function
 if __name__ == "__main__":
 
@@ -567,3 +612,15 @@ if __name__ == "__main__":
             #max_context_length=8000,
             top_k_retrieval=parameters.get('top_k_retrieval',4)
         )
+
+    ### Split between train and test sets
+    if run_steps.get('split_train_test', False):
+        print("\n--- Splitting between training and testing sets ---")
+        parameters = config.get('split_train_test',{})
+        split_train_test(
+            database_path=parameters.get('database_path'),
+            training_set_path=parameters.get('training_set_path'),
+            testing_set_path=parameters.get('testing_set_path'),
+            train_proportion=parameters.get('train_proportion',0.7),
+            random_seed=parameters.get('random_seed',42)
+        )   

@@ -3,7 +3,8 @@
 # ===========================
 run_steps:
   build_database: false # Build the database of Bekanntmachungen by scraping the BMBF website
-  build_sft_dataset: true # Build the training database with relevant document chunks for each prompt in the training data
+  build_sft_dataset: false # Build the training database with relevant document chunks for each prompt in the training data
+  split_train_test: true # Split the training and testing sets for supervised fine-tuning using HuggigFace
   check_database_quality: false # NOTE: not implemented yet
   create_ground_truth: false # NOTE: not implemented yet
   run_summarisation_agent: false # NOTE: not implemented yet
@@ -45,6 +46,13 @@ build_sft_dataset:
   chunk_size: 4000 # Size of the text chunks to be created from the document
   chunk_overlap: 200 # Overlap between the text chunks 
   top_k_retrieval: 4 # Number of top relevant chunks to retrieve for each query
+
+split_train_test:
+  database_path: 'supervised_fine_tuning\dataset.json' # Path to the json file containing the dataset as formatted by Langchain
+  training_set_path: 'supervised_fine_tuning\train_dataset.csv' # Path where to save the training set in CSV format
+  testing_set_path: 'supervised_fine_tuning\test_dataset.csv' # Path where to save the testing set in CSV format
+  train_proportion: 0.7 # Proportion of the dataset to be used for training
+  random_seed: 42 # Seed for the random split
 
 # =================================
 # === Agent Evaluation Settings ===
