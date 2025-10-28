@@ -4,7 +4,8 @@
 run_steps:
   build_database: false # Build the database of Bekanntmachungen by scraping the BMBF website
   build_sft_dataset: false # Build the training database with relevant document chunks for each prompt in the training data
-  split_train_test: true # Split the training and testing sets for supervised fine-tuning using HuggigFace
+  split_train_test: false # Split the training and testing sets for supervised fine-tuning using HuggingFace
+  compute_local_huggingface_inferences: true # Get inferences from a HuggingFace model given a labelled dataset
   check_database_quality: false # NOTE: not implemented yet
   create_ground_truth: false # NOTE: not implemented yet
   run_summarisation_agent: false # NOTE: not implemented yet
@@ -33,9 +34,9 @@ build_database:
   bmbf_search_url: "https://www.bmbf.de/SiteGlobals/Forms/Suche/Bekanntmachungsuche/Bekanntmachungsuche_Formular.html?resourceId=1051612&pageLocale=de&input_=917290&gtp=1051594_list%253D1&resultsPerPage=50" # URL of the page listing Bekanntmachungen
   url_file: './meta_data/bekanntmachung_links.txt' # File of all Bekanntmachung URLs to be processed
   output_dir: './data/' # Directory where the extracted text files will be saved
-  min_delay_seconds:  1 # Minimum and maximum delay in seconds between requests not to overload the server
-  max_delay_seconds:  1.5
-  log_file:  './meta_data/failed_content_urls.txt' # File where logs of failed URLs will be saved
+  min_delay_seconds: 1 # Minimum and maximum delay in seconds between requests not to overload the server
+  max_delay_seconds: 1.5
+  log_file: './meta_data/failed_content_urls.txt' # File where logs of failed URLs will be saved
 
 build_sft_dataset:
   data_folder: 'evaluation\data' # Folder containing the original data files in text or pdf format
@@ -53,6 +54,15 @@ split_train_test:
   testing_set_path: 'supervised_fine_tuning\test_dataset.csv' # Path where to save the testing set in CSV format
   train_proportion: 0.7 # Proportion of the dataset to be used for training
   random_seed: 42 # Seed for the random split
+
+# =============================
+# === HuggingFace Settings ===
+# =============================
+compute_local_huggingface_inferences:
+  dataset_path: 'supervised_fine_tuning\test_dataset.csv' # Path to the CSV file containing the dataset to be used for inference
+  model_name: 'TheBloke/Mistral-7B-Instruct-v0.2-GGUF' # Name of the model to use for inference
+  output_dir: 'supervised_fine_tuning\test_inference_base' # Path where to save the inferences in json format, one per file
+  max_new_tokens: 1024 # Maximum number of tokens for the inference
 
 # =================================
 # === Agent Evaluation Settings ===
