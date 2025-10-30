@@ -233,7 +233,7 @@ def plot_metrics(csv_filepath: str, output_folder_path: str) -> None:
     plt.close(fig)  # Close the figure to free memory
 
 
-### Helper function that given a ground truth json, specific json field and associated .txt file, returns the text sections from the file where the information to annotated the field is located
+### Helper function that given a path to text file and a list of source_spans, returns the text sections from the file where the information to annotated the field is located
 # Input arguments:
 # - [str] doc_path: path to the text document containing the German call
 # - [List[str]] source_spans: a list of section identifiers to extract, e.g. ["1", "annex 3", "introduction"]

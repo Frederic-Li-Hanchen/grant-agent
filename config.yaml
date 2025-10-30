@@ -5,7 +5,8 @@ run_steps:
   build_database: false # Build the database of Bekanntmachungen by scraping the BMBF website
   build_sft_dataset: false # Build the training database with relevant document chunks for each prompt in the training data
   split_train_test: false # Split the training and testing sets for supervised fine-tuning using HuggingFace
-  compute_huggingface_inferences: true # Get inferences from a HuggingFace model given a labelled dataset
+  compute_huggingface_inferences: false # Get inferences from a HuggingFace model given a labelled dataset
+  build_structured_database: true # Build a structured database from the Bekanntmachungen documents to train a graph RAG model
   check_database_quality: false # NOTE: not implemented yet
   create_ground_truth: false # NOTE: not implemented yet
   run_summarisation_agent: false # NOTE: not implemented yet
@@ -54,6 +55,12 @@ split_train_test:
   testing_set_path: 'supervised_fine_tuning\test_dataset.csv' # Path where to save the testing set in CSV format
   train_proportion: 0.7 # Proportion of the dataset to be used for training
   random_seed: 42 # Seed for the random split
+
+build_structured_database:
+  data_folder_path: 'data'
+  chunk_size: 2000
+  chunk_overlap: 200
+  output_path: 'graph_rag/structured_database.jsonl'
 
 # =============================
 # === HuggingFace Settings ===

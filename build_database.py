@@ -13,11 +13,17 @@ from langchain_community.vectorstores import DocArrayInMemorySearch
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.document_loaders import PyPDFLoader, UnstructuredPDFLoader, TextLoader
+from langchain_core.documents import Document
 from typing import List, Dict, Any
 import json
 import sys
 import pandas as pd
 
+
+
+# =================================================
+# === Building the database of Bekanntmachungen ===
+# =================================================
 
 ### Helper function that checks if a webpage exists
 # Input:
@@ -231,8 +237,6 @@ def extract_main_text_via_url(url: str) -> str:
     return '\n\n'.join(filter(None, extracted_lines)).strip()
 
 
-
-
 ### Function to iterate over a list of URLs, extract the webpage contents, and save it to text files
 # Input:
 # - [str] url_file: path to a file containing URLs to scrape (one URL per line)
@@ -348,6 +352,10 @@ def scrape_bekanntmachungen_content(
     end = time()  # End the timer
     print(f"Total execution time: {end - start:.2f} seconds.")
 
+
+# =======================================================
+# === Building the dataset for supervised fine-tuning ===
+# =======================================================
 
 ### Function that builds the training set for supervised fine-tuning of the LLM
 # Input:
@@ -547,7 +555,269 @@ def split_train_test(database_path: str, training_set_path: str, testing_set_pat
     test_frame.to_csv(testing_set_path, index=False)
 
 
-### Main function
+# ======================================================
+# === Building the structured database for Graph RAG ===
+# ======================================================
+
+### Helper function that given a path to a text file, returns a dictionary of all sections contained in the document.
+# Input:
+# - [str] doc_path: path to the text document containing the Bekanntmachung
+# Output:
+# - [Dict[str, str]]: dictionary with key containing section ID and value the correponding text
+def extract_all_sections_from_document(doc_path: str) -> Dict[str, str]:
+    """
+    Parses a grant document and extracts all sections into a dictionary.
+
+    The function identifies sections by numbers (e.g., "1.", "2.1", "7.2.1")
+    at the beginning of a line. It also handles a special "introduction" section
+    (text before section 1) and annexes (Anlage).
+
+    Sections that only contain a title line and are immediately followed by
+    subsections will have their title prepended to the first subsection's content.
+    Sections that are empty (only title, no body, and no subsections) are discarded.
+
+    Args:
+        doc_path: The path to the text document containing the German call.
+
+    Returns:
+        A dictionary where keys are section identifiers (e.g., "introduction",
+        "1", "1.1", "annex 1") and values are the corresponding text content.
+        Returns an empty dictionary if the file is not found.
+    """
+    try:
+        with open(doc_path, 'r', encoding='utf-8') as f:
+            full_text = f.read()
+    except FileNotFoundError:
+        print(f"Error: Document not found at {doc_path}")
+        return {}
+
+    # Regex to find section numbers like 1., 1.1, 2.3.4 etc. at the start of a line.
+    section_pattern = re.compile(r'^\s*(\d(?:\.\d+)*)\.?\s+.*')
+    # Regex for Annexes (Anlage)
+    annex_header_pattern = re.compile(r'^\s*Anlage\s*$', re.IGNORECASE)  # Matches lines with only "Anlage"
+
+    raw_sections_data = {} # Stores {'section_id': {'title_line': '...', 'body': '...'}}
+    
+    current_section_id = 'introduction'
+    current_title_line = '' # For 'introduction', this will remain empty
+    current_content_body = []
+    inside_annex = False
+    annex_counter = 0
+
+    lines = full_text.split('\n')
+
+    for line_idx, line in enumerate(lines):
+        section_match = section_pattern.match(line)
+        is_annex_header = annex_header_pattern.match(line)
+
+        if section_match or is_annex_header:
+            # Before starting a new section, store the content of the previous one
+            if current_section_id:
+                raw_sections_data[current_section_id] = {
+                    'title_line': current_title_line,
+                    'body': '\n'.join(current_content_body).strip()
+                }
+
+            # Reset for the new section
+            current_content_body = []
+            current_title_line = line.strip() # Store the actual title line
+
+            if is_annex_header:
+                inside_annex = True
+                annex_counter += 1
+                current_section_id = f'annex {annex_counter}'
+            elif section_match:
+                new_section_number = section_match.group(1)
+                if inside_annex:
+                    current_section_id = f'annex {annex_counter}.{new_section_number}'
+                else:
+                    current_section_id = new_section_number
+        else:
+            # Append to the current section's body content
+            current_content_body.append(line)
+
+    # Store the last section after the loop finishes
+    if current_section_id:
+        raw_sections_data[current_section_id] = {
+            'title_line': current_title_line,
+            'body': '\n'.join(current_content_body).strip()
+        }
+
+    # --- Pass 2: Post-processing for merging/discarding ---
+    final_sections = {}
+    
+    # Custom sort for section IDs: 'introduction' first, then numerical, then annexes
+    def sort_key(section_id):
+        if section_id == 'introduction':
+            return (0,)
+        if section_id.startswith('annex'):
+            parts = section_id.replace('annex ', '').split('.')
+            return (2,) + tuple(int(p) for p in parts)
+        parts = section_id.split('.')
+        return (1,) + tuple(int(p) for p in parts)
+
+    sorted_section_ids = sorted(raw_sections_data.keys(), key=sort_key)
+    
+    # Keep track of sections that have been merged into others and should be removed
+    sections_to_remove = set()
+
+    for i, section_id in enumerate(sorted_section_ids):
+        section_data = raw_sections_data[section_id]
+        title_line = section_data['title_line']
+        body_content = section_data['body']
+
+        # Check if this section is an "empty" parent
+        if not body_content: # Body content is empty (only title was present or nothing)
+            # Find the first direct subsection
+            first_direct_subsection_id = None
+            for j in range(i + 1, len(sorted_section_ids)):
+                next_section_id = sorted_section_ids[j]
+                
+                is_direct_subsection = False
+                if section_id == 'introduction':
+                    # 'introduction' is parent if next is '1' or 'annex 1'
+                    if next_section_id.startswith('1') and '.' not in next_section_id:
+                        is_direct_subsection = True
+                    elif next_section_id.startswith('annex 1') and len(next_section_id.split('.')) == 2: # 'annex 1'
+                        is_direct_subsection = True
+                elif next_section_id.startswith(section_id + '.'):
+                    # Check if it's a direct child (e.g., "1" -> "1.1", not "1.1.1")
+                    current_parts = section_id.split('.')
+                    next_parts = next_section_id.split('.')
+                    if len(next_parts) == len(current_parts) + 1:
+                        is_direct_subsection = True
+                
+                if is_direct_subsection:
+                    first_direct_subsection_id = next_section_id
+                    break
+            
+            if first_direct_subsection_id:
+                # This is an empty parent section with a direct subsection. Merge its title.
+                # Prepend its title to the first direct subsection's body.
+                # Ensure we don't prepend an empty title line for 'introduction' if it's empty
+                if section_id == 'introduction' and not title_line:
+                    # If introduction is empty and has no title, just remove it.
+                    sections_to_remove.add(section_id)
+                else:
+                    # raw_sections_data[first_direct_subsection_id]['body'] = \
+                    #     f"{title_line}\n{raw_sections_data[first_direct_subsection_id]['body']}".strip()
+                    raw_sections_data[first_direct_subsection_id]['title_line'] = \
+                        f"{title_line}\n{raw_sections_data[first_direct_subsection_id]['title_line']}".strip()
+                    sections_to_remove.add(section_id)
+            elif not title_line and not body_content:
+                # If both title and body are empty (e.g., an empty 'introduction' or a phantom section)
+                sections_to_remove.add(section_id)
+            elif not body_content and title_line: # It has a title but no body and no subsections
+                 sections_to_remove.add(section_id)
+
+    # Construct the final dictionary
+    for section_id in sorted_section_ids:
+        if section_id not in sections_to_remove:
+            section_data = raw_sections_data[section_id]
+            
+            # For 'introduction', we only want its body content (title_line is empty)
+            if section_id == 'introduction':
+                if section_data['body']:
+                    final_sections[section_id] = section_data['body']
+            else:
+                # For other sections, combine title and body.
+                combined_content = f"{section_data['title_line']}\n{section_data['body']}".strip()
+                if combined_content: # Only add if there's actual content
+                    final_sections[section_id] = combined_content
+
+    return final_sections
+
+
+### Function that creates a structured database for the Graph RAG and saves it in jsonl format
+# Input:
+# - [str] data_folder_path: path to the folder containing the original Bekanntmachungen files in text format
+# - [int] chunk_size: maximum size in characters allowed per chunk
+# - [int] chunk_overlap: overlap between chunks in characters
+# - [str] output_path: path to the jsonl file where the database should be saved
+# Output:
+# - None
+def create_structured_database_from_bekanntmachungen(data_folder_path: str, chunk_size: int, chunk_overlap: int, output_path: str):
+
+    print(f'Creating the structured database from {data_folder_path} with chunk size {chunk_size} and overlap {chunk_overlap} for Graph RAG ...\n')
+
+    # List the files in the original folder
+    file_list = [e for e in os.listdir(data_folder_path) if e.endswith('.txt')]
+    file_paths = [os.path.join(data_folder_path, e) for e in file_list]
+
+    # Initialise the Langchain text splitter
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap, length_function=len)
+
+    # Loop on the files 
+    for idx, file_path in enumerate(file_paths):
+        print(f'Processing file {idx+1}/{len(file_paths)}: {file_path}')
+
+        # Check if the document is a Bekanntmachung or not
+        file_name = os.path.basename(file_path)
+        if "bekanntmachung" in file_name.lower() and not "aenderung" in file_name.lower() and not "vergabe" in file_name.lower():
+            document_type = "bekanntmachung"
+        elif "aenderung" in file_name.lower():
+            document_type = "modification"
+        elif "vergabe" in file_name.lower():
+            document_type = "grant"
+        else:
+            document_type = "other"
+
+        # Create meta-data dictionary for the document
+        meta_data = {
+            "document_id": file_name,
+            "document_path": file_path,
+            "document_type": document_type,
+        }
+
+        # Extract text sections from document
+        if document_type == "bekanntmachung":
+            sections = extract_all_sections_from_document(file_path)
+
+            # Split each section into chunks
+            chunk_idx = 1
+            for section_id, section_data in sections.items():
+                text = section_data
+                meta_data["section_id"] = section_id
+                # The section level is the number of dots contained in the section ID 
+                meta_data["section_level"] = f"{section_id.count('.') + 1}"
+                chunks = text_splitter.split_documents([Document(page_content=text, metadata=meta_data)])
+
+                with open(output_path, 'a', encoding='utf-8') as f:
+                    for i, chunk in enumerate(chunks):
+                        meta_data["chunk_id"] = f"{chunk_idx}"
+                        chunk_idx += 1
+                        # Create the final dictionary structure for the JSONL line
+                        record = {
+                            "text": chunk.page_content,
+                            "metadata": chunk.metadata
+                        }
+                        
+                        # # Optionally add a unique chunk ID for easier tracking
+                        # record["metadata"]["chunk_id"] = f"{chunk.metadata.get('original_source_id', 'doc')}_{i}"
+                        
+                        # Write the JSON object followed by a newline character
+                        json_line = json.dumps(record, ensure_ascii=False)
+                        f.write(json_line + '\n')
+
+        else: # The document is not a Bekanntmachung and is usually much shorter, so the full document is used as chunk instead
+            # Read the file
+            with open(file_path, 'r', encoding='utf-8') as f:
+                text = f.read()
+            meta_data["section_id"] = "document"
+            meta_data["section_level"] = "1"
+            record = {
+                "text": text,
+                "metadata": meta_data
+            }
+            with open(output_path, 'a', encoding='utf-8') as f:
+                json_line = json.dumps(record, ensure_ascii=False)
+                f.write(json_line + '\n')
+
+
+
+# ======================
+# === Main function ===
+# ======================
 if __name__ == "__main__":
 
     ### Load the YAML config file and main logic
@@ -624,3 +894,14 @@ if __name__ == "__main__":
             train_proportion=parameters.get('train_proportion',0.7),
             random_seed=parameters.get('random_seed',42)
         )   
+
+    ### Build the structured database for the graph RAG
+    if run_steps.get('build_structured_database', False):
+        print("\n--- Building the structured database for Graph RAG ---")
+        parameters = config.get('build_structured_database',{})
+        create_structured_database_from_bekanntmachungen(
+            data_folder_path=parameters.get('data_folder_path'),
+            chunk_size=parameters.get('chunk_size',1000),
+            chunk_overlap=parameters.get('chunk_overlap',200),
+            output_path=parameters.get('output_path')
+        )

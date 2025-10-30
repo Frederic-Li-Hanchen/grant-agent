@@ -6,6 +6,7 @@ tmp_data/
 evaluation/
 ground_truth/
 supervised_fine_tuning/
+graph_rag/
 .env
 .venv
 venv/
