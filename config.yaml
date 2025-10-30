@@ -5,7 +5,7 @@ run_steps:
   build_database: false # Build the database of Bekanntmachungen by scraping the BMBF website
   build_sft_dataset: false # Build the training database with relevant document chunks for each prompt in the training data
   split_train_test: false # Split the training and testing sets for supervised fine-tuning using HuggingFace
-  compute_local_huggingface_inferences: true # Get inferences from a HuggingFace model given a labelled dataset
+  compute_huggingface_inferences: true # Get inferences from a HuggingFace model given a labelled dataset
   check_database_quality: false # NOTE: not implemented yet
   create_ground_truth: false # NOTE: not implemented yet
   run_summarisation_agent: false # NOTE: not implemented yet
@@ -58,10 +58,10 @@ split_train_test:
 # =============================
 # === HuggingFace Settings ===
 # =============================
-compute_local_huggingface_inferences:
-  dataset_path: 'supervised_fine_tuning\test_dataset.csv' # Path to the CSV file containing the dataset to be used for inference
+compute_huggingface_inferences:
+  dataset_path: 'supervised_fine_tuning/test_dataset.csv' # Path to the CSV file containing the dataset to be used for inference
   model_name: 'TheBloke/Mistral-7B-Instruct-v0.2-GGUF' # Name of the model to use for inference
-  output_dir: 'supervised_fine_tuning\test_inference_base' # Path where to save the inferences in json format, one per file
+  output_dir: 'supervised_fine_tuning/test_inference_base' # Path where to save the inferences in json format, one per file
   max_new_tokens: 1024 # Maximum number of tokens for the inference
 
 # =================================

@@ -8,6 +8,8 @@ ground_truth/
 supervised_fine_tuning/
 .env
 .venv
+venv/
+log*.txt
 __pycache__/
 test.py
 notes.txt

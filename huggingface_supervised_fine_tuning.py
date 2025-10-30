@@ -18,7 +18,7 @@ import torch # Still needed for dtype conversion logic
 # - [int] max_new_tokens: maximum number of new tokens to generate for each inference.
 # Output:
 # - None
-def get_local_huggingface_inferences(
+def get_huggingface_inferences(
     dataset_path: str,
     model_name: str,
     output_dir: str,
@@ -67,7 +67,7 @@ def get_local_huggingface_inferences(
     # Load the quantized model using ctransformers
     # This is much more memory-efficient for CPU inference.
     try:
-        print("Loading quantized model for CPU inference...")
+        print("Loading quantized model for inference...")
         # For CPU, we don't offload to GPU. For GPU, -1 means all layers.
         gpu_layers = 50 if torch.cuda.is_available() else 0
         model = AutoModelForCausalLM.from_pretrained(
@@ -85,10 +85,9 @@ def get_local_huggingface_inferences(
     # --- 2. Inference Loop ---
     # Group samples by the original file path to create one JSON per file
     for file_path, group in df.groupby("file_path"):
-        base_filename = os.path.basename(file_path)
+        base_filename = os.path.basename(str(file_path).replace("\\", "/")) # Normalize path separators for cross-platform compatibility
         output_filename = os.path.splitext(base_filename)[0] + ".json"
         output_filepath = os.path.join(output_dir, output_filename)
-
         results_for_file = {}
         # If an output file already exists, load it to resume from where we left off.
         if os.path.exists(output_filepath):
@@ -148,9 +147,9 @@ if __name__ == "__main__":
     run_steps = config.get('run_steps', {})
 
     ### HuggingFace model inference
-    if run_steps.get('compute_local_huggingface_inferences'):
+    if run_steps.get('compute_huggingface_inferences'):
         print("\n--- Running HuggingFace LLM inferences ---")
-        params = config.get('compute_local_huggingface_inferences',{})
+        params = config.get('compute_huggingface_inferences',{})
 
         # For CPU inference, it's highly recommended to use a quantized GGUF model.
         # The original model name is kept for reference, but we'll use a GGUF version.
@@ -159,7 +158,7 @@ if __name__ == "__main__":
         if model_name and 'GGUF' in model_name.upper():
             print(f"Using quantized GGUF model for efficiency: {model_name}")
 
-        get_local_huggingface_inferences(
+        get_huggingface_inferences(
             dataset_path=params['dataset_path'],
             model_name=model_name,
             output_dir=params['output_dir'],
