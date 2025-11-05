@@ -12,8 +12,14 @@ from dotenv import load_dotenv
 from langchain_community.vectorstores import DocArrayInMemorySearch
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain.output_parsers import PydanticOutputParser, OutputFixingParser
 from langchain_community.document_loaders import PyPDFLoader, UnstructuredPDFLoader, TextLoader
 from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+from google.api_core.exceptions import ResourceExhausted
+from pydantic import BaseModel, Field
+import vertexai
 from typing import List, Dict, Any
 import json
 import sys
@@ -668,6 +674,9 @@ def create_structured_database_from_bekanntmachungen(data_folder_path: str, chun
 
     # Loop on the files 
     for idx, file_path in enumerate(file_paths):
+        # Initialise the chunk index
+        chunk_idx = 1
+
         print(f'Processing file {idx+1}/{len(file_paths)}: {file_path}')
 
         # Check if the document is a Bekanntmachung or not
@@ -692,7 +701,6 @@ def create_structured_database_from_bekanntmachungen(data_folder_path: str, chun
         if document_type == "bekanntmachung":
             sections = extract_all_sections_from_document(file_path)
             # Split each section into chunks
-            chunk_idx = 1
             for section_id, section_data in sections.items():
                 if section_data['body']:
                     text = section_data['body']
@@ -714,7 +722,7 @@ def create_structured_database_from_bekanntmachungen(data_folder_path: str, chun
 
                     with open(output_path, 'a', encoding='utf-8') as f:
                         for i, chunk in enumerate(chunks):
-                            meta_data["chunk_id"] = f"{chunk_idx}"
+                            chunk.metadata["chunk_id"] = f"{chunk_idx}"
                             chunk_idx += 1
                             # Create the final dictionary structure for the JSONL line
                             record = {
@@ -735,6 +743,8 @@ def create_structured_database_from_bekanntmachungen(data_folder_path: str, chun
                 text = f.read()
             meta_data["section_id"] = "document"
             meta_data["section_level"] = "1"
+            meta_data["section_title"] = "full_document"
+            meta_data["chunk_id"] = "1"
             record = {
                 "text": text,
                 "metadata": meta_data
@@ -743,6 +753,172 @@ def create_structured_database_from_bekanntmachungen(data_folder_path: str, chun
                 json_line = json.dumps(record, ensure_ascii=False)
                 f.write(json_line + '\n')
 
+
+### Function that extracts the entities and relationships from the structured database.
+### Entities and relationships are represented as triplets of (subject, predicate, object).
+### Extracts structural triplets (document, HAS_SECTION, section) by parsing the database file.
+### Extracts conceptual triplets (e.g. (document, DEFINES_OBJECTIVE, objective)) by a LLM call.
+### Save all extracted concepts into a jsonl file with fields ["subject", "predicate", "object", "source_document_id", "source_section_title"].
+# Input:
+# - [str] database_path: path to the jsonl file containing the structured database of chunks
+# - [str] output_path: path to the jsonl file where the database of entities and relationships should be saved.
+# - [str] prompt_filepath: path to the file containing the LLM prompt for concept extraction.
+# - [str] llm_name: name of the LLM to be used for triplet extraction.
+# - [float] temperature: temperature parameter of the LLM to be used for entity extraction
+# Output:
+# - None
+def extract_entities_and_relationships(
+        database_path: str,
+        output_path: str, 
+        prompt_filepath: str, 
+        llm_name: str='gemini-2.5-flash',
+        temperature: float=0.1):
+    
+    start_time = time()
+    print('Extracting entities and relationships from the structured database ...')
+
+    # Load the jsonl file containing the chunks
+    with open(database_path, 'r', encoding='utf-8') as f:
+        chunks_database = f.readlines()
+
+    # --- Intelligent Resuming Logic ---
+    # Load existing triplets to avoid duplicates if the script is resumed.
+    existing_triplets = set()
+    if os.path.exists(output_path):
+        print(f"Output file found at {output_path}. Loading existing triplets to prevent duplicates.")
+        with open(output_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    triplet = json.loads(line)
+                    # Create a unique, hashable representation of the triplet
+                    if all(k in triplet for k in ["subject", "predicate", "object"]):
+                        existing_triplets.add((triplet["subject"], triplet["predicate"], triplet["object"]))
+                except json.JSONDecodeError:
+                    print(f"Warning: Could not decode line in existing output file: {line.strip()}")
+        print(f"Loaded {len(existing_triplets)} unique existing triplets.")
+
+    # Create the document structure triplets by iterating over the chunks
+    document_structure_triplets = []
+    print('Creating the document structure triplets ...')
+    for chunk in chunks_database:
+        chunk_data = json.loads(chunk)
+        # Retrieve the title of the section at the deepest level only
+        titles = chunk_data["metadata"]["section_title"].split("; ")
+        deepest_title = titles[-1] if titles else ""
+
+        new_triplet = {
+            "subject": chunk_data["metadata"]["document_id"],
+            "predicate": "HAS_SECTION",
+            "object": deepest_title,
+            "source_document_id": chunk_data["metadata"]["document_id"],
+            "source_section_title": deepest_title
+        }
+
+        # Add triplet only if it's not already in the existing set
+        triplet_key = (new_triplet["subject"], new_triplet["predicate"], new_triplet["object"])
+        if triplet_key not in existing_triplets:
+            document_structure_triplets.append(new_triplet)
+            existing_triplets.add(triplet_key) # Also add to the in-memory set to handle duplicates within the same run
+
+    # Save the document structure triplets in the output jsonl file
+    with open(output_path, 'a', encoding='utf-8') as f:
+        for triplet in document_structure_triplets:
+            json_line = json.dumps(triplet, ensure_ascii=False)
+            f.write(json_line + '\n')
+
+    end_structure = time()
+    print(f"Document structure triplets completed in {end_structure - start_time:.2f} seconds.")
+    
+    # --- Conceptual Triplet Extraction ---
+    # Reload existing triplets to include structural ones and prepare for conceptual triplet resume logic.
+    # We create a set of (doc_id, chunk_id) tuples for which conceptual triplets have already been extracted.
+    processed_chunks = set()
+    if os.path.exists(output_path):
+        with open(output_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    triplet = json.loads(line)
+                    # A conceptual triplet is any triplet that is not structural.
+                    if triplet.get("predicate") != "HAS_SECTION" and "source_document_id" in triplet and "chunk_id" in triplet:
+                        processed_chunks.add((triplet["source_document_id"], triplet["chunk_id"]))
+                except (json.JSONDecodeError, KeyError):
+                    continue # Ignore malformed lines or lines without the required keys
+    # Extracts the conceptual triplets by calling the LLM
+    start_concept = time()
+    print(f'Extracting the conceptual triplets by querying {llm_name} ...')
+    # Initialise the LLM
+    load_dotenv()
+    graph_rag_api_key = os.getenv("GRAPH_RAG_GEMINI_API_KEY")
+    if graph_rag_api_key is None:
+        raise ValueError("GRAPH_RAG_GEMINI_API_KEY not found among the environment variables defined in .env")
+
+    llm = ChatGoogleGenerativeAI(model=llm_name, temperature=temperature, google_api_key=graph_rag_api_key)
+
+    # Load the prompt template from the provided json file
+    with open(prompt_filepath,'r',encoding='utf-8') as f:
+        prompt_template_string = json.load(f)['prompt_template']
+
+    prompt_template = ChatPromptTemplate.from_template(prompt_template_string)
+    # Define the Pydantic model for the expected output
+    class Triplet(BaseModel):
+        """A structured representation of a relationship triplet."""
+        subject: str = Field(description="The subject of the relationship.")
+        predicate: str = Field(description="The predicate or type of the relationship.")
+        object: str = Field(description="The object of the relationship.")
+
+    # Define the chain
+    parser = PydanticOutputParser(pydantic_object=Triplet)
+    output_fixing_parser = OutputFixingParser.from_llm(parser=parser, llm=llm)
+    chain = (prompt_template | llm | output_fixing_parser)
+
+    # Loop on the chunks of the structured database
+    for i, chunk in enumerate(chunks_database):
+        chunk_data = json.loads(chunk)
+        source_document_id = chunk_data["metadata"]["document_id"]
+        chunk_id = chunk_data["metadata"]["chunk_id"]
+
+        # --- Intelligent Resuming for Conceptual Triplets ---
+        if (source_document_id, chunk_id) in processed_chunks:
+            print(f"Skipping chunk {i+1}/{len(chunks_database)}: Conceptual triplets for doc '{source_document_id}' chunk '{chunk_id}' already exist.")
+            continue
+
+        print(f"Processing chunk {i+1}/{len(chunks_database)}: doc '{source_document_id}' chunk '{chunk_id}'")
+
+        # Retrieve the title of the section at the deepest level only
+        titles = chunk_data["metadata"]["section_title"].split("; ")
+        deepest_title = titles[-1] if titles else ""
+
+        # Prompt input
+        prompt_input = {
+            "document_title": chunk_data["metadata"]["document_id"],
+            "section_title": chunk_data["metadata"]["section_title"],
+            "text": chunk_data["text"],
+            "format_instructions": parser.get_format_instructions(),
+        }
+        try:
+            # The parser returns a Pydantic object. It might be None if the LLM returns nothing.
+            result_triplet = chain.invoke(prompt_input)
+            
+            if result_triplet and all([result_triplet.subject, result_triplet.predicate, result_triplet.object]):
+                new_triplet = result_triplet.dict() # Convert Pydantic model to dictionary
+                new_triplet["source_document_id"] = source_document_id
+                new_triplet["source_section_title"] = deepest_title
+                new_triplet["chunk_id"] = chunk_id
+                # Save the new triplet in the output jsonl file
+                with open(output_path, 'a', encoding='utf-8') as f:
+                    json_line = json.dumps(new_triplet, ensure_ascii=False)
+                    f.write(json_line + '\n')
+            else:
+                print(f"  - No conceptual triplet found for chunk {chunk_id} of document {source_document_id}.")
+        except ResourceExhausted as e:
+            print(f"  - Resource exhausted for chunk {chunk_id}. Waiting 60 seconds before retrying. Error: {e}")
+            sleep(60)
+            # You might want to re-add the chunk to a queue to retry later
+        except Exception as e:
+            print(f"  - Error generating conceptual triplet for chunk {chunk_id} of document {source_document_id}: {e}. Skipping.")
+    end_concept = time()
+    print(f"Conceptual triplets completed in {end_concept - start_concept:.2f} seconds.")
+    print(f"Entities and relationships extracted and saved in {output_path} in {end_structure - start_time:.2f} seconds.")
 
 
 # ======================
@@ -834,4 +1010,16 @@ if __name__ == "__main__":
             chunk_size=parameters.get('chunk_size',1000),
             chunk_overlap=parameters.get('chunk_overlap',200),
             output_path=parameters.get('output_path')
+        )
+
+    ### Build the database of entities and relationships for the graph RAG
+    if run_steps.get('build_graph_database', False):
+        print("\n--- Building the database of entities and relationships for Graph RAG ---")
+        parameters = config.get('build_graph_database',{}) 
+        extract_entities_and_relationships(
+            database_path=parameters.get('database_path'),
+            output_path=parameters.get('output_path'),
+            llm_name=parameters.get('llm_name','models/embedding-001'),
+            prompt_filepath=parameters.get('prompt_filepath'),
+            temperature=parameters.get('temperature',0.1)
         )

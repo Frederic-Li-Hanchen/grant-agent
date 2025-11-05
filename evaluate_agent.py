@@ -9,13 +9,12 @@ import seaborn as sns
 #from langchain.chains import SimpleSequentialChain, LLMChain
 from langchain_core.language_models import BaseLanguageModel
 from langchain.prompts import ChatPromptTemplate
-from langchain.output_parsers import PydanticOutputParser
+from langchain.output_parsers import PydanticOutputParser, OutputFixingParser
 from langchain_core.exceptions import OutputParserException
 #from langchain.chat_models import ChatOpenAI
 from dotenv import load_dotenv
 from typing import List, Dict
 from pydantic import BaseModel, Field
-from langchain.output_parsers import OutputFixingParser
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings

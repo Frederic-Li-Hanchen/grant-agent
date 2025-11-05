@@ -1,9 +1,8 @@
 from langchain.chains import RetrievalQA
-from langchain.chat_models import init_chat_model
 from langchain_community.document_loaders import PyPDFLoader, UnstructuredPDFLoader, TextLoader
 from langchain_community.vectorstores import DocArrayInMemorySearch
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from google.api_core.exceptions import ResourceExhausted
 from tenacity import retry, stop_after_attempt, wait_random_exponential, retry_if_exception_type
 import json
@@ -88,8 +87,7 @@ def extract_info_from_document(
     gemini_api_key = os.getenv("GEMINI_API_KEY")
     if gemini_api_key is None:
         raise ValueError("GEMINI_API_KEY not found among the environment variables defined in .env")
-    os.environ['GOOGLE_API_KEY'] = gemini_api_key
-    llm = init_chat_model(model_name, temperature=temperature, max_tokens=max_tokens, model_provider=model_provider) 
+    llm = ChatGoogleGenerativeAI(model=model_name, temperature=temperature, max_tokens=max_tokens, google_api_key=gemini_api_key)
 
     # # Detect language of the document and translate it into English if necessary
     # translation_query = ChatPromptTemplate.from_template(
@@ -102,7 +100,7 @@ def extract_info_from_document(
     #     translated_chunks.append(translation["english_text"])
 
     # Information extraction
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001") # NOTE: other embeddings could be experimented with
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=gemini_api_key) # NOTE: other embeddings could be experimented with
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     documents = loader.load()
     split_docs = text_splitter.split_documents(documents)
