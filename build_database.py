@@ -791,8 +791,8 @@ def extract_entities_and_relationships(
                 try:
                     triplet = json.loads(line)
                     # Create a unique, hashable representation of the triplet
-                    if all(k in triplet for k in ["subject", "predicate", "object"]):
-                        existing_triplets.add((triplet["subject"], triplet["predicate"], triplet["object"]))
+                    if all(k in triplet for k in ["subject_type", "subject_value", "predicate", "object_type", "object_value"]):
+                        existing_triplets.add((triplet["subject_type"], triplet["subject_value"], triplet["predicate"], triplet["object_type"], triplet["object_value"]))
                 except json.JSONDecodeError:
                     print(f"Warning: Could not decode line in existing output file: {line.strip()}")
         print(f"Loaded {len(existing_triplets)} unique existing triplets.")
@@ -807,15 +807,18 @@ def extract_entities_and_relationships(
         deepest_title = titles[-1] if titles else ""
 
         new_triplet = {
-            "subject": chunk_data["metadata"]["document_id"],
+            "subject_type": "DOCUMENT",
+            "subject_value": chunk_data["metadata"]["document_id"],
             "predicate": "HAS_SECTION",
-            "object": deepest_title,
+            "object_type": "SECTION",
+            "object_value": deepest_title,
             "source_document_id": chunk_data["metadata"]["document_id"],
-            "source_section_title": deepest_title
+            "source_section_title": deepest_title,
+            "chunk_id": chunk_data["metadata"]["chunk_id"]
         }
 
         # Add triplet only if it's not already in the existing set
-        triplet_key = (new_triplet["subject"], new_triplet["predicate"], new_triplet["object"])
+        triplet_key = (new_triplet["subject_type"], new_triplet["subject_value"], new_triplet["predicate"], new_triplet["object_type"], new_triplet["object_value"])
         if triplet_key not in existing_triplets:
             document_structure_triplets.append(new_triplet)
             existing_triplets.add(triplet_key) # Also add to the in-memory set to handle duplicates within the same run
@@ -862,9 +865,11 @@ def extract_entities_and_relationships(
     # Define the Pydantic model for the expected output
     class Triplet(BaseModel):
         """A structured representation of a relationship triplet."""
-        subject: str = Field(description="The subject of the relationship.")
+        subject_type: str = Field(description="The type of the subject that takes values among the previously defined entities.")
+        subject_value: str = Field(description="The value taken by the subject, of maximum 3 sentences or 150 words.")
         predicate: str = Field(description="The predicate or type of the relationship.")
-        object: str = Field(description="The object of the relationship.")
+        object_type: str = Field(description="The type of the object that takes values among the previously defined entities.")
+        object_value: str = Field(description="The value taken by the object, of maximum 3 sentences or 150 words.")
 
     # Define the chain
     parser = PydanticOutputParser(pydantic_object=Triplet)
@@ -899,7 +904,7 @@ def extract_entities_and_relationships(
             # The parser returns a Pydantic object. It might be None if the LLM returns nothing.
             result_triplet = chain.invoke(prompt_input)
             
-            if result_triplet and all([result_triplet.subject, result_triplet.predicate, result_triplet.object]):
+            if result_triplet and all([result_triplet.subject_type, result_triplet.subject_value, result_triplet.predicate, result_triplet.object_type, result_triplet.object_value]):
                 new_triplet = result_triplet.dict() # Convert Pydantic model to dictionary
                 new_triplet["source_document_id"] = source_document_id
                 new_triplet["source_section_title"] = deepest_title
