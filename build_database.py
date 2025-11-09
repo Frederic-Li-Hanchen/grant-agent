@@ -652,6 +652,63 @@ def extract_all_sections_from_document(doc_path: str) -> Dict[str, Dict[str, str
 
     return raw_sections_data
 
+### Helper function that cleans the extracted text chunks by applying text cleaning heuristics
+# Input:
+# - [str] text: the text chunk to be cleaned
+# - [bool] add_tags: if True, add html style tags to indicate relevant information such as emails, phone numbers, amounts, dates
+# Output:
+# - [str]: the cleaned text chunk
+def clean_extracted_text(text: str, add_tags: bool = False) -> str:
+    # Add a space inside a word where one of the inside letters is upper-case (e.g. "undFrau" -> "und Frau")
+    text = re.sub(r'([a-zäöüß])([A-ZÄÖÜ])', r'\1 \2', text)
+
+    # Define common TLDs to make email regex more specific and avoid false positives.
+    common_tlds = [
+        # Generic
+        'com', 'org', 'net', 'edu', 'gov', 'info',
+        # EU Countries
+        'at', 'be', 'bg', 'cy', 'cz', 'de', 'dk', 'ee', 'es', 'eu', 'fi', 'fr', 
+        'gr', 'hr', 'hu', 'ie', 'it', 'lt', 'lu', 'lv', 'mt', 'nl', 'pl', 'pt', 
+        'ro', 'se', 'si', 'sk',
+        # Other specified countries
+        'ca', 'ch', 'cn', 'jp', 'kr', 'mx', 'tw', 'uk', 'us', 'za'
+    ]
+    # Sort for consistency
+    common_tlds.sort()
+    tld_pattern_part = r'(?:' + '|'.join(re.escape(tld) for tld in common_tlds) + r')'
+
+    # Add a space after an email address if it is immediately followed by a letter (e.g., "name@domain.deund" -> "name@domain.de und")
+    email_spacing_pattern = rf'(\b[\w\.-]+@[\w\.-]+\.{tld_pattern_part})(\w)'
+    text = re.sub(email_spacing_pattern, r'\1 \2', text, flags=re.IGNORECASE)
+
+    # Add tags if enabled
+    if add_tags:
+        # Tag email addresses with <email> ... </email>
+        email_pattern = rf'(\b[\w\.-]+@[\w\.-]+\.{tld_pattern_part}\b)'
+        text = re.sub(email_pattern, r'<email>\1</email>', text)
+
+        # # Tag phone numbers with <phone> ... </phone> (e.g. 03 86/78 10-57 64, +49-30-123456, (030) 1234567, etc.)
+        # TODO: reimplement after double checking which exact phone formats should be covered
+        # phone_pattern = r'(\b(?:\+?\d{1,4}[-.\s]?)?(?:\(?\d{2,5}\)?[-.\s]?)?(?:[\d][-.\s/]?){5,}\d\b)'
+        # text = re.sub(phone_pattern, r'<phone>\1</phone>', text)
+
+        # Tag amounts with <amount> ... </amount> (e.g. 1.000,00 €, 5000 EUR, 500 000 Euro, etc.)
+        amount_pattern = r'(\b\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?\s*(?:€|EUR|Euro|CHF)\b)'
+        text = re.sub(amount_pattern, r'<amount>\1</amount>', text)
+
+        # Tag dates with <date> ... </date> (e.g. 15.05.2006, 13. Januar 2010, etc.)
+        date_pattern = r'(\b\d{1,2}\.\s?\d{1,2}\.\s?\d{2,4}\b|\b\d{1,2}\.?\s(?:Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)\s\d{2,4}\b)'
+        text = re.sub(date_pattern, r'<date>\1</date>', text)
+
+        # Tag percentages with <percentage> ... </percentage> (e.g. 15 %, 7,5%, 2.3%, etc.)
+        percentage_pattern = r'(\b\d{1,3}(?:[.,]\d+)?\s*%\b)'
+        text = re.sub(percentage_pattern, r'<percentage>\1</percentage>', text)
+
+        # Tag durations with <duration> ... </duration> (e.g. 6 Monate, 2 Jahre, etc.)
+        duration_pattern = r'(\b\d+\s+(?:Monat(?:e|en)?|Jahr(?:e|en)?|Woche(?:n)?|Tag(?:e|en)?)\b)'
+        text = re.sub(duration_pattern, r'<duration>\1</duration>', text)
+    return text
+
 
 ### Function that creates a structured database for the Graph RAG and saves it in jsonl format
 # Input:
@@ -659,11 +716,17 @@ def extract_all_sections_from_document(doc_path: str) -> Dict[str, Dict[str, str
 # - [int] chunk_size: maximum size in characters allowed per chunk
 # - [int] chunk_overlap: overlap between chunks in characters
 # - [str] output_path: path to the jsonl file where the database should be saved
+# - [bool] clean_text: if True, clean the text chunks by applying text cleaning heuristics
+# - [bool] add_tags: if True, add html style tags to indicate relevant information such as emails, phone numbers, amounts, dates
 # Output:
 # - None
-def create_structured_database_from_bekanntmachungen(data_folder_path: str, chunk_size: int, chunk_overlap: int, output_path: str):
+def create_structured_database_from_bekanntmachungen(data_folder_path: str, chunk_size: int, chunk_overlap: int, output_path: str, clean_text: bool=True, add_tags: bool=False) -> None:
 
     print(f'Creating the structured database from {data_folder_path} with chunk size {chunk_size} and overlap {chunk_overlap} for Graph RAG ...\n')
+    if clean_text:
+        print('Text cleaning enabled: applying text cleaning heuristics to each chunk.\n')
+    if add_tags:
+        print('Tagging enabled: adding html style tags to indicate relevant information such as emails, phone numbers, amounts, dates.\n')
 
     # List the files in the original folder
     file_list = [e for e in os.listdir(data_folder_path) if e.endswith('.txt')]
@@ -725,7 +788,10 @@ def create_structured_database_from_bekanntmachungen(data_folder_path: str, chun
                             chunk.metadata["chunk_id"] = f"{chunk_idx}"
                             unique_id = f"{meta_data['document_id'].rsplit('.', 1)[0]}_sec-{section_id}_chunk-{chunk_idx}"
                             chunk_idx += 1  
-                            chunk.metadata["id"] = unique_id        
+                            chunk.metadata["id"] = unique_id    
+                            # Apply text cleaning and tag addition if enabled
+                            if clean_text:
+                                chunk.page_content = clean_extracted_text(chunk.page_content, add_tags=add_tags)   
                             # Create the final dictionary structure for the JSONL line
                             record = {
                                 "text": chunk.page_content,
@@ -740,6 +806,8 @@ def create_structured_database_from_bekanntmachungen(data_folder_path: str, chun
             # Read the file
             with open(file_path, 'r', encoding='utf-8') as f:
                 text = f.read()
+            if clean_text:
+                text = clean_extracted_text(text, add_tags=add_tags)
             meta_data["section_id"] = "document"
             meta_data["section_level"] = "1"
             meta_data["section_title"] = "full_document"
@@ -1015,7 +1083,9 @@ if __name__ == "__main__":
             data_folder_path=parameters.get('data_folder_path'),
             chunk_size=parameters.get('chunk_size',1000),
             chunk_overlap=parameters.get('chunk_overlap',200),
-            output_path=parameters.get('output_path')
+            output_path=parameters.get('output_path'),
+            clean_text=parameters.get('clean_text',True),
+            add_tags=parameters.get('add_tags',False)
         )
 
     ### Build the database of entities and relationships for the graph RAG
