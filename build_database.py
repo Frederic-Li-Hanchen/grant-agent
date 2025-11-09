@@ -723,15 +723,14 @@ def create_structured_database_from_bekanntmachungen(data_folder_path: str, chun
                     with open(output_path, 'a', encoding='utf-8') as f:
                         for i, chunk in enumerate(chunks):
                             chunk.metadata["chunk_id"] = f"{chunk_idx}"
-                            chunk_idx += 1
+                            unique_id = f"{meta_data['document_id'].rsplit('.', 1)[0]}_sec-{section_id}_chunk-{chunk_idx}"
+                            chunk_idx += 1  
+                            chunk.metadata["id"] = unique_id        
                             # Create the final dictionary structure for the JSONL line
                             record = {
                                 "text": chunk.page_content,
                                 "metadata": chunk.metadata
                             }
-                            
-                            # # Optionally add a unique chunk ID for easier tracking
-                            # record["metadata"]["chunk_id"] = f"{chunk.metadata.get('original_source_id', 'doc')}_{i}"
                             
                             # Write the JSON object followed by a newline character
                             json_line = json.dumps(record, ensure_ascii=False)
@@ -745,6 +744,8 @@ def create_structured_database_from_bekanntmachungen(data_folder_path: str, chun
             meta_data["section_level"] = "1"
             meta_data["section_title"] = "full_document"
             meta_data["chunk_id"] = "1"
+            unique_id = f"{meta_data['document_id'].rsplit('.', 1)[0]}_sec-document_chunk-1"  
+            meta_data["id"] = unique_id     
             record = {
                 "text": text,
                 "metadata": meta_data

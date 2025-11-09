@@ -65,7 +65,7 @@ build_structured_database:
 
 build_graph_database:
   database_path: 'graph_rag/structured_database_truncated.jsonl' # Path to the jsonl file containing the structured database of chunks
-  output_path: 'graph_rag/graph_database_truncated.jsonl' # Path where to save the resulting jsonl file
+  output_path: 'graph_rag/graph_database_truncated_v4.jsonl' # Path where to save the resulting jsonl file
   llm_name: 'gemini-2.5-flash' # Name of the LLM to be used for concept extraction
   prompt_filepath: 'prompts/graph_rag_entity_extraction.json' # Path to the json file containing the prompt
   temperature: 0.1 # Temperature parameter for the LLM
