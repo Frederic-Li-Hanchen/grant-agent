@@ -687,26 +687,54 @@ def clean_extracted_text(text: str, add_tags: bool = False) -> str:
         email_pattern = rf'(\b[\w\.-]+@[\w\.-]+\.{tld_pattern_part}\b)'
         text = re.sub(email_pattern, r'<email>\1</email>', text)
 
-        # # Tag phone numbers with <phone> ... </phone> (e.g. 03 86/78 10-57 64, +49-30-123456, (030) 1234567, etc.)
-        # TODO: reimplement after double checking which exact phone formats should be covered
-        # phone_pattern = r'(\b(?:\+?\d{1,4}[-.\s]?)?(?:\(?\d{2,5}\)?[-.\s]?)?(?:[\d][-.\s/]?){5,}\d\b)'
-        # text = re.sub(phone_pattern, r'<phone>\1</phone>', text)
+        # Tag phone numbers with <phone> ... </phone> (e.g. 03 86/78 10-57 64, +49-30-123456, (030) 1234567, etc.)
+        # Make sure that if one parenthesis is present, the other is also present
+        phone_pattern = r'(Telefon\s*:)\s*(\+?[\d\s\-/\(]*[\d\s\-/\)]*\d)'
+        text = re.sub(phone_pattern, r'\1 <phone>\2</phone>', text)
+        # # Because the above pattern captures spaces for the phone number, we make sure that there are no leading or trailing spaces within the tags
+        # text = re.sub(r'<phone>\s+([\d\+\s\-/\(\)]+)\s+</phone>', r'<phone>\1</phone>', text)
 
-        # Tag amounts with <amount> ... </amount> (e.g. 1.000,00 €, 5000 EUR, 500 000 Euro, etc.)
+        # Tag amounts with <amount> ... </amount> (e.g. 1.000,00 €, 5000 EUR, 500 000 Euro, 10 Millionen EUR, etc.)
         amount_pattern = r'(\b\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?\s*(?:€|EUR|Euro|CHF)\b)'
         text = re.sub(amount_pattern, r'<amount>\1</amount>', text)
+        amount_pattern2 = r'(\b\d{1,3}([,.]\d+)?\s*(Million|Millionen|Milliarde|Milliarden)\s*(?:€|EUR|Euro|CHF)\b)'
+        text = re.sub(amount_pattern2, r'<amount>\1</amount>', text)
 
         # Tag dates with <date> ... </date> (e.g. 15.05.2006, 13. Januar 2010, etc.)
         date_pattern = r'(\b\d{1,2}\.\s?\d{1,2}\.\s?\d{2,4}\b|\b\d{1,2}\.?\s(?:Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)\s\d{2,4}\b)'
         text = re.sub(date_pattern, r'<date>\1</date>', text)
 
         # Tag percentages with <percentage> ... </percentage> (e.g. 15 %, 7,5%, 2.3%, etc.)
-        percentage_pattern = r'(\b\d{1,3}(?:[.,]\d+)?\s*%\b)'
+        percentage_pattern = r'(\d+\s*%)'
         text = re.sub(percentage_pattern, r'<percentage>\1</percentage>', text)
 
         # Tag durations with <duration> ... </duration> (e.g. 6 Monate, 2 Jahre, etc.)
-        duration_pattern = r'(\b\d+\s+(?:Monat(?:e|en)?|Jahr(?:e|en)?|Woche(?:n)?|Tag(?:e|en)?)\b)'
+        # Also includes modifiers such as "bis ... zu", "maximal", "mindestens", "zwischen ... und"
+        # Must exclude ages (e.g. "von Kinder unter 3 Jahren", "nicht älter als 65 Jahre")
+        duration_pattern = r'((?:bis zu\s*|maximal\s*|zwischen \d+ und\s*|(?:von )?\d+ bis\s*|mindestens\s*|höchstens\s*)?\d+\s+(?:Monat(?:e|en)?|Jahr(?:e|en)?|Woche(?:n)?|Tag(?:e|en)?)\b)'
         text = re.sub(duration_pattern, r'<duration>\1</duration>', text)
+        duration_pattern2 = r'(?:(?<=von Kinder unter )|(?<=nicht älter als )|(?<=nicht aelter als ))(<duration>)'+duration_pattern+r'(</duration>)'
+        text = re.sub(duration_pattern2, r'\2', text)
+
+        # Tag persons with <person> ... </person> (e.g. Dr. Max Mustermann, Prof. Dr. Erika Musterfrau, Frau Erika Musterfrau, etc.)
+        # Titles (gender, professor or doctor) are optional, but at least one must be present to avoid false positives
+        # Name detection is achieved by a regular expression of type (AB?C?|A?BC?|AB?C) where A, B, C are the title patterns
+        title_pattern = r'(?:(?:Herr|Frau|Herrn|Mr\.|Ms\.)\s*)'
+        professor_pattern = r'(?:Prof\.\s*|Professor(?:in)?\s*)'
+        doctor_pattern = r'(?:Dr\.\s*(?:-Ing\.|-ing\.|rer\.\s*nat\.)?\s*)'
+        firstname_pattern = r'(?:[A-ZÄÖÜ][a-zäöüß]+)?(?:(?:-|\s)[A-ZÄÖÜ][a-zäöüß]+)?\s*'
+        lastname_pattern = r'[A-ZÄÖÜ][a-zäöüß]+(?:-[A-ZÄÖÜ][a-zäöüß]+)?'
+        person_pattern = r'(\b(?:' + title_pattern + professor_pattern + r'?' + doctor_pattern + r'?|' + title_pattern + r'?' + professor_pattern + doctor_pattern + r'?|' + title_pattern + r'?' + professor_pattern + r'?'+ doctor_pattern + r')' + firstname_pattern + r'?' + lastname_pattern + r'\b)'
+        text = re.sub(person_pattern, r'<person>\1</person>', text)
+        # The person tagging may have caught some extra words that are not names (e.g. "Telefon", "E-Mail", etc.), so we remove those from within the tags
+        exclusion_pattern = r'(?:\s*)(Telefon|Beratungstelefon|Telefonnummer|E-Mail|Email|Mail|Fax|Telefax|Adresse|Anschrift|Straße|Str|Platz|Weg|Hausnummer|Nr|Postleitzahl|Ort|Stadt|Bundesland|Land|Webseite|Website|Internet)'
+        text = re.sub(r'<person>\s*' + person_pattern + exclusion_pattern + r'\s*</person>', r'<person>\1</person> \2', text)
+        
+        # Make sure than any closing tag is followed by a space if followed by a letter
+        text = re.sub(r'(</(email|phone|amount|date|percentage|duration|person)>)\s*(\w)', r'\1 \3', text)
+        # Make sure that there are no closing or leading spaces within the tags
+        text = re.sub(r'<(email|phone|amount|date|percentage|duration|person)>\s+([^<]+?)\s+</\1>', r'<\1>\2</\1>', text)
+
     return text
 
 
