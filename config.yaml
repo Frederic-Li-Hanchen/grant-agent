@@ -74,9 +74,10 @@ build_graph_database:
   temperature: 0.1 # Temperature parameter for the LLM
 
 build_chromadb:
-  database_path: 'graph_rag/structured_database_truncated.jsonl' # Path to the jsonl file containing the structured database of chunks
+  database_path: 'graph_rag/structured_database.jsonl' # Path to the jsonl file containing the structured database of chunks
   chroma_db_path: 'chroma_db' # Path where to save the ChromaDB database
   embedding_model_path: 'sentence-transformers/paraphrase-multilingual-mpnet-base-v2' # Path to the embedding model to be used
+  batch_size: 500 # Number of database entries to process in each batch
 
 
 # =============================

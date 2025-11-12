@@ -1031,35 +1031,72 @@ def extract_entities_and_relationships(
 # - [str] database_path: path to the jsonl file containing the structured database of chunks
 # - [str] chroma_db_path: path to the ChromaDB database folder where the structured database should be saved
 # - [str] embedding_model: name of the embedding model to be used for ChromaDB
+# - [int] batch_size: number of entries to process in each batch
 # Output:
 # - None
-def build_chromadb(database_path: str, chroma_db_path: str, embedding_model_path: str = 'sentence-transformers/paraphrase-multilingual-mpnet-base-v2') -> None:
+def build_chromadb(
+    database_path: str, 
+    chroma_db_path: str, 
+    embedding_model_path: str = 'sentence-transformers/paraphrase-multilingual-mpnet-base-v2',
+    batch_size: int = 500
+) -> None:
     start_time = time()
     print('\nBuilding the ChromaDB structured database from the structured database ...')
 
-    # 1. Define the embedding function for ChromaDB
-    embedding_func = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=embedding_model_path)
-
-    # Load the jsonl file containing the chunks
-    with open(database_path, 'r', encoding='utf-8') as f:
-        data = [json.loads(line) for line in f]
-
-    # Prepare the augmented text from which the embeddings will be computed
-    for entry in data:
-        augmented_text = f"Document Type: {entry['metadata']['document_type']}. Section Title: {entry['metadata']['section_title']}. Text: {entry['text']}"
-        entry['augmented_text'] = augmented_text
-
-    # Create the ChromaDB client
+    # Create the ChromaDB client and define the embedding function
     client = chromadb.PersistentClient(path=chroma_db_path)
+    embedding_func = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=embedding_model_path)
     
-    # 2. Create the collection and pass the embedding function
+    # Get or create the collection
     collection = client.get_or_create_collection(name="bekanntmachungen_index", embedding_function=embedding_func)
 
-    # Prepare the data for insertion
-    texts = [entry['augmented_text'] for entry in data]
-    metadatas = [entry['metadata'] for entry in data]
-    ids = [entry['metadata']['id'] for entry in data]
-    collection.add(documents=texts, metadatas=metadatas, ids=ids)
+    # --- Intelligent resume logic: Check for existing IDs ---
+    # Get the count of items already in the collection to fetch their IDs
+    existing_count = collection.count()
+    existing_ids = set()
+    if existing_count > 0:
+        print(f"Collection already contains {existing_count} entries. Fetching existing IDs to avoid duplicates.")
+        # Fetch existing entries in batches to manage memory usage
+        for offset in range(0, existing_count, batch_size):
+            ids_batch = collection.get(limit=batch_size, offset=offset)['ids']
+            existing_ids.update(ids_batch)
+        print(f"Found {len(existing_ids)} unique IDs in the database.")
+
+    # Load the source jsonl file and filter out entries that already exist
+    with open(database_path, 'r', encoding='utf-8') as f:
+        all_data = [json.loads(line) for line in f]
+    
+    data_to_add = [entry for entry in all_data if entry['metadata']['id'] not in existing_ids]
+
+    if not data_to_add:
+        print("No new data to add. The ChromaDB collection is already up-to-date.")
+        end_time = time()
+        print(f"ChromaDB build process completed in {end_time - start_time:.2f} seconds.\n")
+        return
+
+    print(f"Found {len(data_to_add)} new entries to add to the database.")
+
+    # --- Process and add data in batches to save progress incrementally ---
+    total_batches = (len(data_to_add) + batch_size - 1) // batch_size
+
+    for i in range(total_batches):
+        batch_start_time = time()
+        start_index = i * batch_size
+        end_index = start_index + batch_size
+        batch_data = data_to_add[start_index:end_index]
+
+        print(f"Processing batch {i+1}/{total_batches} ({len(batch_data)} entries)...")
+
+        # Prepare the data for the current batch
+        texts = [f"Document Type: {entry['metadata']['document_type']}. Section Title: {entry['metadata']['section_title']}. Text: {entry['text']}" for entry in batch_data]
+        metadatas = [entry['metadata'] for entry in batch_data]
+        ids = [entry['metadata']['id'] for entry in batch_data]
+
+        # Add the batch to the collection
+        collection.add(documents=texts, metadatas=metadatas, ids=ids)
+        batch_end_time = time()
+        print(f"  - Batch {i+1} added in {batch_end_time - batch_start_time:.2f} seconds.")
+
     end_time = time()
     print(f"ChromaDB structured database completed in {end_time - start_time:.2f} seconds.\n")
 
@@ -1169,5 +1206,6 @@ if __name__ == "__main__":
         build_chromadb(
             database_path=parameters.get('database_path'),
             chroma_db_path=parameters.get('chroma_db_path'),
-            embedding_model_path=parameters.get('embedding_model_path','sentence-transformers/paraphrase-multilingual-mpnet-base-v2')
+            embedding_model_path=parameters.get('embedding_model_path','sentence-transformers/paraphrase-multilingual-mpnet-base-v2'),
+            batch_size=parameters.get('batch_size',500)
         )
