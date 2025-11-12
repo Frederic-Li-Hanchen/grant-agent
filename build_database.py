@@ -19,12 +19,15 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from google.api_core.exceptions import ResourceExhausted
 from pydantic import BaseModel, Field
-import vertexai
+#import vertexai
 from typing import List, Dict, Any
 import json
 import sys
 import pandas as pd
+from sentence_transformers import SentenceTransformer
+import chromadb
 
+from chromadb.utils import embedding_functions
 
 
 # =================================================
@@ -356,7 +359,7 @@ def scrape_bekanntmachungen_content(
         print(f"Failed URLs saved to {log_file}")
 
     end = time()  # End the timer
-    print(f"Total execution time: {end - start:.2f} seconds.")
+    print(f"Total execution time: {end - start:.2f} seconds.\n")
 
 
 # =======================================================
@@ -514,7 +517,7 @@ def generate_training_dataset_prompts(
 
     end_time = time()
     print(f"Generated training dataset prompts in {end_time - start_time:.2f} seconds.")
-    print(f"Saved {len(training_data_entries)} entries to {output_filepath}")
+    print(f"Saved {len(training_data_entries)} entries to {output_filepath}\n")
 
 
 ### Function that splits the saved dataset into training and testing sets and converts them into the proper HuggingFace data format
@@ -750,7 +753,7 @@ def clean_extracted_text(text: str, add_tags: bool = False) -> str:
 # - None
 def create_structured_database_from_bekanntmachungen(data_folder_path: str, chunk_size: int, chunk_overlap: int, output_path: str, clean_text: bool=True, add_tags: bool=False) -> None:
 
-    print(f'Creating the structured database from {data_folder_path} with chunk size {chunk_size} and overlap {chunk_overlap} for Graph RAG ...\n')
+    print(f'\nCreating the structured database from {data_folder_path} with chunk size {chunk_size} and overlap {chunk_overlap} for Graph RAG ...\n')
     if clean_text:
         print('Text cleaning enabled: applying text cleaning heuristics to each chunk.\n')
     if add_tags:
@@ -872,7 +875,7 @@ def extract_entities_and_relationships(
         temperature: float=0.1):
     
     start_time = time()
-    print('Extracting entities and relationships from the structured database ...')
+    print('\nExtracting entities and relationships from the structured database ...')
 
     # Load the jsonl file containing the chunks
     with open(database_path, 'r', encoding='utf-8') as f:
@@ -1020,7 +1023,45 @@ def extract_entities_and_relationships(
             print(f"  - Error generating conceptual triplet for chunk {chunk_id} of document {source_document_id}: {e}. Skipping.")
     end_concept = time()
     print(f"Conceptual triplets completed in {end_concept - start_concept:.2f} seconds.")
-    print(f"Entities and relationships extracted and saved in {output_path} in {end_structure - start_time:.2f} seconds.")
+    print(f"Entities and relationships extracted and saved in {output_path} in {end_concept - start_time:.2f} seconds.\n")
+
+
+### Function that builds a ChromaDB structured database from the structured database
+# Input:
+# - [str] database_path: path to the jsonl file containing the structured database of chunks
+# - [str] chroma_db_path: path to the ChromaDB database folder where the structured database should be saved
+# - [str] embedding_model: name of the embedding model to be used for ChromaDB
+# Output:
+# - None
+def build_chromadb(database_path: str, chroma_db_path: str, embedding_model_path: str = 'sentence-transformers/paraphrase-multilingual-mpnet-base-v2') -> None:
+    start_time = time()
+    print('\nBuilding the ChromaDB structured database from the structured database ...')
+
+    # 1. Define the embedding function for ChromaDB
+    embedding_func = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=embedding_model_path)
+
+    # Load the jsonl file containing the chunks
+    with open(database_path, 'r', encoding='utf-8') as f:
+        data = [json.loads(line) for line in f]
+
+    # Prepare the augmented text from which the embeddings will be computed
+    for entry in data:
+        augmented_text = f"Document Type: {entry['metadata']['document_type']}. Section Title: {entry['metadata']['section_title']}. Text: {entry['text']}"
+        entry['augmented_text'] = augmented_text
+
+    # Create the ChromaDB client
+    client = chromadb.PersistentClient(path=chroma_db_path)
+    
+    # 2. Create the collection and pass the embedding function
+    collection = client.get_or_create_collection(name="bekanntmachungen_index", embedding_function=embedding_func)
+
+    # Prepare the data for insertion
+    texts = [entry['augmented_text'] for entry in data]
+    metadatas = [entry['metadata'] for entry in data]
+    ids = [entry['metadata']['id'] for entry in data]
+    collection.add(documents=texts, metadatas=metadatas, ids=ids)
+    end_time = time()
+    print(f"ChromaDB structured database completed in {end_time - start_time:.2f} seconds.\n")
 
 
 # ======================
@@ -1066,13 +1107,6 @@ if __name__ == "__main__":
             max_delay_seconds=parameters.get('max_delay_seconds'), 
             log_file=parameters.get('log_file')
         )
-
-        # NOTE: Debugging purposes
-        # log_file = './meta_data/failed_content_urls.txt' # File where logs of failed URLs will be saved
-        # log_file2 = './meta_data/failed_content_urls2.txt' # File where logs of failed URLs will be saved (when running again the script onto the log files)
-        #scrape_bekanntmachungen_content(url_file, output_dir='./data_debug/', min_delay_seconds=min_delay_seconds, max_delay_seconds=max_delay_seconds, log_file=log_file, debug=20)
-        # #Retry failed URLs from the log file
-        #scrape_bekanntmachungen_content(log_file, output_dir, min_delay_seconds=min_delay_seconds, max_delay_seconds=max_delay_seconds, log_file=log_file2)
 
     ### Generate the ground truth database for supervised fine-tuning
     if run_steps.get('build_sft_dataset', False):
@@ -1126,4 +1160,14 @@ if __name__ == "__main__":
             llm_name=parameters.get('llm_name','models/embedding-001'),
             prompt_filepath=parameters.get('prompt_filepath'),
             temperature=parameters.get('temperature',0.1)
+        )
+
+    ### Build the ChromaDB structured database for the graph RAG
+    if run_steps.get('build_chromadb', False):
+        print("\n--- Building the ChromaDB structured database for Graph RAG ---")
+        parameters = config.get('build_chromadb',{}) 
+        build_chromadb(
+            database_path=parameters.get('database_path'),
+            chroma_db_path=parameters.get('chroma_db_path'),
+            embedding_model_path=parameters.get('embedding_model_path','sentence-transformers/paraphrase-multilingual-mpnet-base-v2')
         )
