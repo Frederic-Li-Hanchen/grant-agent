@@ -970,9 +970,11 @@ def extract_entities_and_relationships(
         predicate: str = Field(description="The predicate or type of the relationship.")
         object_type: str = Field(description="The type of the object that takes values among the previously defined entities.")
         object_value: str = Field(description="The value taken by the object, of maximum 3 sentences or 150 words.")
-
-    # Define the chain
-    parser = PydanticOutputParser(pydantic_object=Triplet)
+    # Define a class that is a triplet list:
+    class TripletList(BaseModel):
+        triplets: List[Triplet] = Field(description="A list of triplets related to one of the following fields: 'objective', 'inclusion_criteria', 'exclusion_criteria', 'deadline', 'max_funding', 'max_duration', 'procedure', 'contact', 'misc'.")
+    # Define the chain to parse a list of triplets
+    parser = PydanticOutputParser(pydantic_object=TripletList)
     output_fixing_parser = OutputFixingParser.from_llm(parser=parser, llm=llm)
     chain = (prompt_template | llm | output_fixing_parser)
 
@@ -1002,17 +1004,18 @@ def extract_entities_and_relationships(
         }
         try:
             # The parser returns a Pydantic object. It might be None if the LLM returns nothing.
-            result_triplet = chain.invoke(prompt_input)
+            result_triplet_list = chain.invoke(prompt_input)
             
-            if result_triplet and all([result_triplet.subject_type, result_triplet.subject_value, result_triplet.predicate, result_triplet.object_type, result_triplet.object_value]):
-                new_triplet = result_triplet.dict() # Convert Pydantic model to dictionary
-                new_triplet["source_document_id"] = source_document_id
-                new_triplet["source_section_title"] = deepest_title
-                new_triplet["chunk_id"] = chunk_id
-                # Save the new triplet in the output jsonl file
-                with open(output_path, 'a', encoding='utf-8') as f:
-                    json_line = json.dumps(new_triplet, ensure_ascii=False)
-                    f.write(json_line + '\n')
+            if result_triplet_list and result_triplet_list.triplets:
+                for triplet in result_triplet_list.triplets:
+                    new_triplet = triplet.dict() # Convert Pydantic model to dictionary
+                    new_triplet["source_document_id"] = source_document_id
+                    new_triplet["source_section_title"] = deepest_title
+                    new_triplet["chunk_id"] = chunk_id
+                    # Save the new triplet in the output jsonl file
+                    with open(output_path, 'a', encoding='utf-8') as f:
+                        json_line = json.dumps(new_triplet, ensure_ascii=False)
+                        f.write(json_line + '\n')
             else:
                 print(f"  - No conceptual triplet found for chunk {chunk_id} of document {source_document_id}.")
         except ResourceExhausted as e:
