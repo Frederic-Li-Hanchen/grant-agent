@@ -711,13 +711,15 @@ def clean_extracted_text(text: str, add_tags: bool = False) -> str:
         percentage_pattern = r'(\d+\s*%)'
         text = re.sub(percentage_pattern, r'<percentage>\1</percentage>', text)
 
-        # Tag durations with <duration> ... </duration> (e.g. 6 Monate, 2 Jahre, etc.)
+        # Tag durations with <duration> ... </duration> (e.g. 6 Monate, 2 Jahre, 24-monatiges, etc.)
         # Also includes modifiers such as "bis ... zu", "maximal", "mindestens", "zwischen ... und"
         # Must exclude ages (e.g. "von Kinder unter 3 Jahren", "nicht älter als 65 Jahre")
         duration_pattern = r'((?:bis zu\s*|maximal\s*|zwischen \d+ und\s*|(?:von )?\d+ bis\s*|mindestens\s*|höchstens\s*)?\d+\s+(?:Monat(?:e|en)?|Jahr(?:e|en)?|Woche(?:n)?|Tag(?:e|en)?)\b)'
         text = re.sub(duration_pattern, r'<duration>\1</duration>', text)
-        duration_pattern2 = r'(?:(?<=von Kinder unter )|(?<=nicht älter als )|(?<=nicht aelter als ))(<duration>)'+duration_pattern+r'(</duration>)'
-        text = re.sub(duration_pattern2, r'\2', text)
+        duration_pattern2 = r'(\d+-(?:Jahres|jährig(?:\w)*|Monats|monatig(?:\w*)|Tage|tägig(?:\w*)))(-|\s)'
+        text = re.sub(duration_pattern2, r'<duration>\1</duration>\2', text)
+        duration_pattern3 = r'(?:(?<=von Kinder unter )|(?<=nicht älter als )|(?<=nicht aelter als ))(<duration>)'+duration_pattern+r'(</duration>)'
+        text = re.sub(duration_pattern3, r'\2', text)
 
         # Tag persons with <person> ... </person> (e.g. Dr. Max Mustermann, Prof. Dr. Erika Musterfrau, Frau Erika Musterfrau, etc.)
         # Titles (gender, professor or doctor) are optional, but at least one must be present to avoid false positives
