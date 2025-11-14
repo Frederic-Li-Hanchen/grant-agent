@@ -713,26 +713,27 @@ def clean_extracted_text(text: str, add_tags: bool = False) -> str:
 
         # Tag durations with <duration> ... </duration> (e.g. 6 Monate, 2 Jahre, 24-monatiges, etc.)
         # Also includes modifiers such as "bis ... zu", "maximal", "mindestens", "zwischen ... und"
-        # Must exclude ages (e.g. "von Kinder unter 3 Jahren", "nicht älter als 65 Jahre")
+        # Must exclude ages (e.g. "von Kinder unter 3 Jahren", "nicht älter als 65 Jahre") or cycles (e.g. "alle 20 Jahre")
         duration_pattern = r'((?:bis zu\s*|maximal\s*|zwischen \d+ und\s*|(?:von )?\d+ bis\s*|mindestens\s*|höchstens\s*)?\d+\s+(?:Monat(?:e|en)?|Jahr(?:e|en)?|Woche(?:n)?|Tag(?:e|en)?)\b)'
         text = re.sub(duration_pattern, r'<duration>\1</duration>', text)
         duration_pattern2 = r'(\d+-(?:Jahres|jährig(?:\w)*|Monats|monatig(?:\w*)|Tage|tägig(?:\w*)))(-|\s)'
         text = re.sub(duration_pattern2, r'<duration>\1</duration>\2', text)
-        duration_pattern3 = r'(?:(?<=von Kinder unter )|(?<=nicht älter als )|(?<=nicht aelter als ))(<duration>)'+duration_pattern+r'(</duration>)'
+        duration_pattern3 = r'(?:(?<=Kindern )|(?<=Kinder )|(?<=Kinder unter )|(?<=Kindern unter )|(?<=nicht älter als )|(?<=nicht aelter als )|(?<=alle ))(<duration>)'+duration_pattern+r'(</duration>)'
         text = re.sub(duration_pattern3, r'\2', text)
 
         # Tag persons with <person> ... </person> (e.g. Dr. Max Mustermann, Prof. Dr. Erika Musterfrau, Frau Erika Musterfrau, etc.)
         # Titles (gender, professor or doctor) are optional, but at least one must be present to avoid false positives
         # Name detection is achieved by a regular expression of type (AB?C?|A?BC?|AB?C) where A, B, C are the title patterns
-        title_pattern = r'(?:(?:Herr|Frau|Herrn|Mr\.|Ms\.)\s*)'
+        # NOTE: in some rare cases, the person name is not having any title preceding it and is therefore missed. To avoid false positives, these are ignored.
+        title_pattern = r'(?:(?:Herr|Frau|Herrn|Mr\.?|Ms\.?)\s*)'
         professor_pattern = r'(?:Prof\.\s*|Professor(?:in)?\s*)'
         doctor_pattern = r'(?:Dr\.\s*(?:-Ing\.|-ing\.|rer\.\s*nat\.)?\s*)'
-        firstname_pattern = r'(?:[A-ZÄÖÜ][a-zäöüß]+)?(?:(?:-|\s)[A-ZÄÖÜ][a-zäöüß]+)?\s*'
-        lastname_pattern = r'[A-ZÄÖÜ][a-zäöüß]+(?:-[A-ZÄÖÜ][a-zäöüß]+)?'
+        firstname_pattern = r'(?:[A-ZÄÖÜ][a-zäöüß]+)?(?:(?:-[a-zA-ZÄÖÜ]|\s[A-ZÄÖÜ])[a-zäöüß]+)?\s*'
+        lastname_pattern = r'(?:[A-ZÄÖÜ][a-zäöüß]+(?:-[A-ZÄÖÜ][a-zäöüß]+)?|[A-ZÄÖÜ]+(?:(?:-|s)[A-ZÄÖÜ]+)?)'
         person_pattern = r'(\b(?:' + title_pattern + professor_pattern + r'?' + doctor_pattern + r'?|' + title_pattern + r'?' + professor_pattern + doctor_pattern + r'?|' + title_pattern + r'?' + professor_pattern + r'?'+ doctor_pattern + r')' + firstname_pattern + r'?' + lastname_pattern + r'\b)'
         text = re.sub(person_pattern, r'<person>\1</person>', text)
         # The person tagging may have caught some extra words that are not names (e.g. "Telefon", "E-Mail", etc.), so we remove those from within the tags
-        exclusion_pattern = r'(?:\s*)(Telefon|Beratungstelefon|Telefonnummer|E-Mail|Email|Mail|Fax|Telefax|Adresse|Anschrift|Straße|Str|Platz|Weg|Hausnummer|Nr|Postleitzahl|Ort|Stadt|Bundesland|Land|Webseite|Website|Internet)'
+        exclusion_pattern = r'(?:\s*)(Telefon|Beratungstelefon|Telefonnummer|E-Mail|Email|Mail|Fax|Telefax|Adresse|Anschrift|Straße|Str|Platz|Weg|Hausnummer|Nr|Postleitzahl|Ort|Stadt|Bundesland|Land|Webseite|Website|Internet|Department|Abteilung)'
         text = re.sub(r'<person>\s*' + person_pattern + exclusion_pattern + r'\s*</person>', r'<person>\1</person> \2', text)
         
         # Make sure than any closing tag is followed by a space if followed by a letter
@@ -821,7 +822,7 @@ def create_structured_database_from_bekanntmachungen(data_folder_path: str, chun
                             chunk.metadata["chunk_id"] = f"{chunk_idx}"
                             unique_id = f"{meta_data['document_id'].rsplit('.', 1)[0]}_sec-{section_id}_chunk-{chunk_idx}"
                             chunk_idx += 1  
-                            chunk.metadata["id"] = unique_id    
+                            chunk.metadata["id"] = unique_id.replace(' ','')    
                             # Apply text cleaning and tag addition if enabled
                             if clean_text:
                                 chunk.page_content = clean_extracted_text(chunk.page_content, add_tags=add_tags)   
