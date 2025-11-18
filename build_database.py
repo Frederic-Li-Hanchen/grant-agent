@@ -188,9 +188,9 @@ def extract_main_text_via_url(url: str) -> str:
             text = text.replace(term, placeholder2)
         # Heuristics that should not apply to URLs and exception terms
         text = re.sub(r'([.,:;!?\)])([A-Za-z]|(?<!\d\.)\d[-.\)])', r'\1 \2', text) # Add space after punctuation if followed by a letter, or number indicating a section or list item
-        text = re.sub(r'(\d)([A-Za-z])', r'\1 \2', text) # Add space after number if followed by a letter
+        text = re.sub(r'(\d)([A-ZÄÖÜa-z])', r'\1 \2', text) # Add space after number if followed by a letter
         text = re.sub(r'(\d+)\s*%', r'\1 %', text) # Ensure space before percentage sign (if not there) for consistency purposes
-        text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text) # Add space between lowercase and uppercase letters
+        text = re.sub(r'([a-z])([A-ZÄÖÜ])', r'\1 \2', text) # Add space between lowercase and uppercase letters
         text = re.sub(r'([A-Z][A-Z]+)([a-z])', r'\1 \2', text) # Add space between acronym and lowercase letters
         text = re.sub(r'([A-Za-z])(\d)', r'\1 \2', text) # Add space between letter followed by a number
         # Replace placeholders back with their original values
@@ -224,7 +224,16 @@ def extract_main_text_via_url(url: str) -> str:
             text = re.sub(rf'(?<={word_char})' + acronym_pattern, r' \g<acronym>', text) # Add a space between a word character and subsequent acronym if not already there
         text = re.sub(r'\s+', ' ', text) # Change multiple spaces to a single one
         text = re.sub(r'([\[({])\s*', r'\1', text) # Remove spaces after opening bracket or parenthesis
-        text = re.sub(r'\s*([\])}])', r'\1', text) # Remove space before closing brackets or parenthesis 
+        text = re.sub(r'\s*([\])}])', r'\1', text) # Remove space before closing brackets or parenthesis
+        # Sometimes a line break after the title name is missing. Add one to prevent improper title segmentation
+        title_pattern = (
+            r'(\d(?:\.\d)*\.? (?:Zuwendungszweck(?: Modul)?|Rechtsgrundlage(?:n)?|Zuwendungszweck, Rechtsgrundlage(?:n)?|Gegenstand der Förderung|Zuwendungsempfänger|Zuwendungsvoraussetzungen|'
+            r'Art(?:,| und) Umfang(?:,| und) Höhe der (?:Zuwendung|Förderung)|Art und Umfang der Zuwendung|Sonstige Zuwendungsbestimmungen|(?:Antragsv|Förderv|V)erfahren|Projektträger|Einschaltung eines Projektträgers|'
+            r'Vorlage und Auswahl von Vorhabenbeschreibungen|Projektskizzen|Förmliche Förderanträge|Kriterien der Begutachtung der Projektskizzen und förmlichen Förderanträge|Verfügbarkeit der Vordrucke|'
+            r'Weitere Förderabsichten|Inkrafttreten|Sonstige Nebenbestimmungen|Qualifikationsnachweis|Auswahl- und Entscheidungsverfahren|(?:Einschalten eines Projektträgers und )?Anforderung von Unterlagen|'
+            r'Allgemeine Zuwendungsvoraussetzungen(?:/Zuwendungsempfänger(?::)?)?)) ([A-ZÄÖÜß]|\d)'
+        )
+        text = re.sub(title_pattern, r'\1\n\n\2', text)
         
         if not text: # Skip empty elements
             continue
@@ -602,7 +611,9 @@ def extract_all_sections_from_document(doc_path: str) -> Dict[str, Dict[str, str
         return {}
 
     # Regex to find section numbers like 1., 1.1, 2.3.4 etc. at the start of a line.
-    section_pattern = re.compile(r'^\s*(\d(?:\.\d+)*)\.?\s+.*')
+    # Note: some documents also have section titles such as A 3, A.4.3, A. 3.2, B.3, B 7.2, B. 5.1, etc.
+    #section_pattern = re.compile(r'^\s*(\d(?:\.\d+)*)\.?\s+.*')
+    section_pattern = re.compile(r'^\s*(((?:A|B)[\. ]?\s*)?\d(?:\.\d+)*)\.?\s+.*') 
     # Regex for Annexes (Anlage)
     annex_header_pattern = re.compile(r'^\s*Anlage\s*$', re.IGNORECASE)  # Matches lines with only "Anlage"
 
@@ -652,6 +663,10 @@ def extract_all_sections_from_document(doc_path: str) -> Dict[str, Dict[str, str
             'title_line': current_title_line,
             'body': '\n'.join(current_content_body).strip()
         }
+
+    # If the document has a single section called 'introduction' (may happen for short Bekanntmachungen), change it to 'document'
+    if 'introduction' in raw_sections_data and len(raw_sections_data) == 1:
+        raw_sections_data['document'] = raw_sections_data.pop('introduction')
 
     return raw_sections_data
 
@@ -714,7 +729,7 @@ def clean_extracted_text(text: str, add_tags: bool = False) -> str:
         # Tag durations with <duration> ... </duration> (e.g. 6 Monate, 2 Jahre, 24-monatiges, etc.)
         # Also includes modifiers such as "bis ... zu", "maximal", "mindestens", "zwischen ... und"
         # Must exclude ages (e.g. "von Kinder unter 3 Jahren", "nicht älter als 65 Jahre") or cycles (e.g. "alle 20 Jahre")
-        duration_pattern = r'((?:bis zu\s*|maximal\s*|zwischen \d+ und\s*|(?:von )?\d+ bis\s*|mindestens\s*|höchstens\s*)?\d+\s+(?:Monat(?:e|en)?|Jahr(?:e|en)?|Woche(?:n)?|Tag(?:e|en)?)\b)'
+        duration_pattern = r'((?:bis zu\s*|maximal\s*|zwischen \d+ und\s*|(?:von )?\d+ bis\s*|mindestens\s*|höchstens\s*)?(?:\d+|ein|zwei|drei|vier|fünf|vierundzwanzig|sechsunddreizig)\s+(?:Monat(?:e|en)?|Jahr(?:e|en)?|Woche(?:n)?|Tag(?:e|en)?)\b)'
         text = re.sub(duration_pattern, r'<duration>\1</duration>', text)
         duration_pattern2 = r'(\d+-(?:Jahres|jährig(?:\w)*|Monats|monatig(?:\w*)|Tage|tägig(?:\w*)))(-|\s)'
         text = re.sub(duration_pattern2, r'<duration>\1</duration>\2', text)
