@@ -1,7 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
-import re
+import regex as re
 import os
 from time import sleep, time
 import random  # For random sleep intervals
@@ -613,7 +613,8 @@ def extract_all_sections_from_document(doc_path: str) -> Dict[str, Dict[str, str
     # Regex to find section numbers like 1., 1.1, 2.3.4 etc. at the start of a line.
     # Note: some documents also have section titles such as A 3, A.4.3, A. 3.2, B.3, B 7.2, B. 5.1, etc.
     #section_pattern = re.compile(r'^\s*(\d(?:\.\d+)*)\.?\s+.*')
-    section_pattern = re.compile(r'^\s*(((?:A|B)[\. ]?\s*)?\d(?:\.\d+)*)\.?\s+.*') 
+    #section_pattern = re.compile(r'^\s*(((?:A|B)[\. ]?\s*)?\d(?:\.\d+)*)\.?\s+.*') 
+    section_pattern = re.compile(r'^\s*(((?:A|B)[\. ]?\s*)?[1-9](?:\.[1-9]+)*)\.?\s+.*') 
     # Regex for Annexes (Anlage)
     annex_header_pattern = re.compile(r'^\s*Anlage\s*$', re.IGNORECASE)  # Matches lines with only "Anlage"
 
@@ -871,12 +872,203 @@ def create_structured_database_from_bekanntmachungen(data_folder_path: str, chun
                 json_line = json.dumps(record, ensure_ascii=False)
                 f.write(json_line + '\n')
 
+### Function that assigns a metadata tag 'topics' to all chunks of a structured database for efficient grouping when calling a LLM for entity extraction
+# Input:
+# - [str] database_path: the path to the jsonl file containing the structured database of chunks
+# - [str] output_path: the path where to save the output database of structured chunks with augmented metadata
+# Output:
+# - None
+def assign_topic_to_chunk(database_path: str, output_path: str):
+
+    start_time = time()
+
+    # Load the jsonl file
+    with open(database_path, 'r', encoding='utf-8') as f:
+        database = f.readlines()
+    
+    # Define the heuristics to determine whether a chunk should be tagged with the corresponding topic
+    heuristics = {}
+    # Objective heuristics
+    # This filtering is done by using section indices: the objective is always described either in 'document', 'introduction', or any section under '1' or '2'.
+    # Any chunk from a section whose title contains "Zuwendungszweck" is kept. Otherwise, a keyword-based filtering is added.
+    objective = r'(?:Bereich|Ziel | ziehlt)'
+    heuristics['objective'] = {
+        'sections': [r'document', r'introduction', r'^1(?:\.\d)*\s(?=Zuwendungszweck)', r'^1(?:\.\d)*\s(?!Zuwendungszweck)', r'^2(?:\.\d)*'], 
+        'added_filters': {
+            're': {
+                r'document': [objective], 
+                r'introduction': [objective], 
+                r'^1(?:\.\d)*\s(?=Zuwendungszweck)': [], # Any chunk from section Zuwendungszweck is kept
+                r'^1(?:\.\d)*\s(?!Zuwendungszweck)': [objective],  
+                r'^2(?:\.\d)*': [objective]
+            },
+            'operator': 'or'
+        }
+    }
+
+    # Inclusion criteria heuristics
+    # Inclusion criteria are mostly found in Section 3, with supporting information sometimes found in sections 4, 2, and 1
+    # Chunks from sections 4, 2 and 1 are filtered by keywords, while any chunk from section 3 is kept
+    inclusion = r'(?:L(?:a|ä)nd(?:er|ern)? |qualifiziert|(?:antrags)?berechtigt|Einschlusskriterien|Teilnahmebedingungen)'
+    heuristics['inclusion_criteria'] = {
+        'sections': [r'^1(?:\.\d)*', r'^2(?:\.\d)*', r'^3(?:\.\d)*', r'^4(?:\.\d)*'],
+        'added_filters': {
+            're': {
+                r'^1(?:\.\d)*': [inclusion],
+                r'^2(?:\.\d)*': [inclusion],
+                r'^3(?:\.\d)*': [], # Any chunk from Section 3.* is kept
+                r'^4(?:\.\d)*': [inclusion]
+            },
+            'operator': 'or'
+        }
+    }
+
+    # Exclusion criteria heuristics
+    # Exclusion criteria are mostly found in sections 2, 3, 4 and 5.
+    # A keyword filtering is added for the chunks from these sections.
+    exclusion = r'(?:ausschließlich |Ausschlusskriterien|nicht älter als|nicht finanziert|nicht (\w)*berechtigt)'
+    heuristics['exclusion_criteria'] = {
+        'sections': [r'^2(?:\.\d)*', r'^3(?:\.\d)*', r'^4(?:\.\d)*', r'^5(?:\.\d)*'],
+        'added_filters': {
+            're': {
+                r'^2(?:\.\d)*': [exclusion],
+                r'^3(?:\.\d)*': [exclusion],
+                r'^4(?:\.\d)*': [exclusion],
+                r'^5(?:\.\d)*': [exclusion]
+            },
+            'operator': 'or'
+        }
+    }
+
+    # Deadline heuristics: based on the presence of both <date> tags and specific keywords.
+    deadline1 = r'<date>.*</date>'
+    deadline2 = r'(?:spätestens|vor dem|bis zum|deadline|Frist |Stichtag )'
+    heuristics['deadline'] = {'re': [deadline1, deadline2], 'operator': 'and'}
+
+    # Max funding heuristics: based on the presence of both <amount> tags and specific keywords.
+    max_funding1 = r'<amount>.*</amount>'
+    max_funding2 = r'(?:bis zu|maximal|höchstens|Förderhöchstbetrag |pro Vorhaben|pro (?:Industriep|Forschungsp|Verbundp|Entwicklungsp|P)rojekt |Fördervolumen |pro (?:Projektv|V)erbund|pro (?:Projektp|P)artner)'
+    heuristics['max_funding'] = {'re': [max_funding1, max_funding2], 'operator': 'and'}
+
+    # Max duration heuristics: based on the presence of both <duration> tags and specific keywords.
+    max_duration1 = r'<duration>.*</duration>'
+    max_duration2 = r'(?:Laufzeit|(?:Industriep|Forschungsp|Verbundp|Entwicklungsp|P)rojekt|Dauer|gefördert)'
+    heuristics['max_duration'] = {'re': [max_duration1, max_duration2], 'operator': 'and'}
+
+    # Procedure heuristics
+    # Any chunk from a section containing "Verfahren" or variants in its title are kept.
+    # Otherwise, chunks from other sections must contains the keywords einstufig|zweistufig|dreistufig|vierstufig.
+    procedure = r'(?:(?:E|e)instufig|(?:Z|z)weistufig|(?:D|d)reistufig|(?:V|v)ierstufig)|1-stufig|2-stufig|3-stufig|4-stufig|Verfahrensstufe'
+    heuristics['procedure'] = {
+        'sections': [r'(?<!(?:1|2)(?:\.\d)*.*)\s(?:V|v|\w*v)erfahren',r'.*'],
+        'added_filters': {
+            're': {
+                r'(?<!(?:1|2)(?:\.\d)*.*)\s(?:V|v|\w*v)erfahren': [],
+                r'.*': [procedure]
+            },
+            'operator': 'or'
+        }
+    }
+
+    # Contact heuristics
+    # Chunks that contain specific combinations of <person>, <phone> and <email> tags, with or without specific keywords.
+    contact1 = r'(?s)^(?=.*<person>)(?=.*<phone>).*'
+    contact2 = r'(?s)^(?=.*<person>)(?=.*<email>).*'
+    contact3 = r'(?s)^(?=.*<phone>)(?=.*<email>).*'
+    contact4 = r'(?s)^(?=.*(weitere Informationen|Kontakt|kontaktieren|Ansprechpartner))(?=.*<email>).*'
+    contact5 = r'(?s)^(?=.*(weitere Informationen|Kontakt|kontaktieren|Ansprechpartner))(?=.*<phone>).*'
+    heuristics['contact'] = {'re': [contact1, contact2, contact3, contact4, contact5], 'operator': 'or'}
+
+    # Misc heuristics
+    # Includes rules to catch chunks discussing Förderquote, de-minimis, preferences regarding consortium participants, geographical requirements regarding result exploitation.
+    misc1 = r'(?s)^(?=.*(Förderquote|Verbundförderquote|förderfähige Kosten|Wissenschaftseinrichtungen|Fraunhofer|Hochschulen|SME))(?=.*<percentage>).*' # Förderquote
+    misc2 = r'(?:d|D)e(?:-|\s)(?:M|m)inimis'
+    misc3 = r'(?s)^(?=.*besonders)(?=.*aufgefordert)(?=.*beteiligen).*'
+    misc4 = r'(?s)^(?=.*Ergebnisse)(?=.*nur in ).*'
+    heuristics['misc'] = {'re': [misc1, misc2, misc3, misc4], 'operator': 'or'}
+
+    # Loop on the chunks from the database
+    topics = heuristics.keys()
+    chunk_idx = 0
+    output_file = open(output_path, 'a', encoding='utf-8')
+
+    for list_item in database:
+        # Print progress
+        chunk_idx += 1
+        if chunk_idx%1000 == 0:
+            print(f"Processed the {chunk_idx}th database entry ...")
+        # Load the chunk
+        chunk = json.loads(list_item)
+        # Get text and meta-data
+        text = chunk.get('text','')
+        chunk_id = chunk.get('metadata',{}).get('id','not found')
+        section_title = chunk.get('metadata',{}).get('section_title','not found')
+        # Set the chunk metadata "topics" field to empty list
+        if chunk.get('metadata',{}):
+            chunk['metadata']['topics'] = []
+        else:
+            print(f'    Metadata missing for chunk number {chunk_id}. Skipping ...')
+            continue
+
+        # Loop on the topics
+        for topic in topics:
+            rules = heuristics[topic].get('re',[])
+            sections = heuristics[topic].get('sections',[])
+            operator = heuristics[topic].get('operator','')
+
+            if rules: # Regular expressions to look for relevant chunks
+                conditions = [isinstance(re.search(e,text),re.Match) for e in rules]
+                if (operator == 'and' and sum(conditions) == len(conditions)) or (operator == 'or' and sum(conditions)>=1): # Either all are at least one condition must be met depending on the operator
+                    # Add the topic tag to the chunk metadata
+                    chunk['metadata']['topics'] += [topic]
+                
+            elif sections: # Section titles to look for relevant chunks
+                # Get additional regular expression rules
+                added_filters = heuristics[topic].get('added_filters', {})
+                # Keep only the (sub)title with the deepest level if not an annex (Anlage)
+                section_titles = section_title.split(';')
+                if section_titles[0] != 'Anlage':
+                    section_title = section_title.split(';')[-1].strip()
+                else:
+                    section_title = 'Anlage'
+                # Check if the chunk belongs to any of the allowed sections
+                conditions = [isinstance(re.search(e,section_title), re.Match) for e in sections]
+                if sum(conditions)>=1:
+                    # If added filters are present, check if the condition(s) for the corresponding section is (are) fulfiled
+                    if added_filters:
+                        # Get the correct set of conditions by obtaining the (first) element of sections that returned true
+                        idx = conditions.index(True)
+                        additional_rules = added_filters.get('re', []).get(sections[idx], [])
+                        # Check that all additional conditions are fulfilled
+                        if additional_rules:
+                            additional_conditions = [isinstance(re.search(e,text),re.Match) for e in additional_rules]
+                            if added_filters.get('operator','') == 'and':
+                                keep_chunk = (sum(additional_conditions)==len(additional_conditions))
+                            elif added_filters.get('operator','') == 'or':
+                                keep_chunk = (sum(additional_conditions)>=1)
+                        else: # No additional rule for this specific section, the chunk is always kept
+                            keep_chunk = True
+                    else: # No added filter present
+                        keep_chunk = True
+                    if keep_chunk:
+                        # Add the topic tag to the chunk metadata
+                        chunk['metadata']['topics'] += [topic]
+
+        # Add the updated chunk to the new database
+        json_line = json.dumps(chunk, ensure_ascii=False)
+        output_file.write(json_line+'\n')
+
+    # Close the output file
+    output_file.close()
+    end_time = time()
+    print(f'Topic tagging process completed in {end_time-start_time:.2f} seconds.')
+
 
 ### Function that extracts the entities and relationships from the structured database.
 ### Entities and relationships are represented as triplets of (subject, predicate, object).
 ### Extracts structural triplets (document, HAS_SECTION, section) by parsing the database file.
 ### Extracts conceptual triplets (e.g. (document, DEFINES_OBJECTIVE, objective)) by a LLM call.
-### Save all extracted concepts into a jsonl file with fields ["subject", "predicate", "object", "source_document_id", "source_section_title"].
+### Save all extracted concepts into a jsonl file with fields ["subject_type", "subject_value", "predicate", "object_type", "object_value", "source_document_id", "source_section_title"].
 # Input:
 # - [str] database_path: path to the jsonl file containing the structured database of chunks
 # - [str] output_path: path to the jsonl file where the database of entities and relationships should be saved.
@@ -1206,6 +1398,15 @@ if __name__ == "__main__":
             output_path=parameters.get('output_path'),
             clean_text=parameters.get('clean_text',True),
             add_tags=parameters.get('add_tags',False)
+        )
+
+    ### Add the topics tags to the structured database of chunks
+    if run_steps.get('add_topic_tags', False):
+        print("\n--- Adding the 'topics' metadata tags to the entries of the structured database ---")
+        parameters = config.get('add_topic_tags',{})
+        assign_topic_to_chunk(
+            database_path=parameters.get('database_path'),
+            output_path=parameters.get('output_path')
         )
 
     ### Build the database of entities and relationships for the graph RAG

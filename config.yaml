@@ -6,7 +6,8 @@ run_steps:
   build_sft_dataset: false # Build the training database with relevant document chunks for each prompt in the training data
   split_train_test: false # Split the training and testing sets for supervised fine-tuning using HuggingFace
   compute_huggingface_inferences: false # Get inferences from a HuggingFace model given a labelled dataset
-  build_structured_database: true # Build a structured database of text chunks from the Bekanntmachungen documents to train a graph RAG model
+  build_structured_database: false # Build a structured database of text chunks from the Bekanntmachungen documents to train a graph RAG model
+  add_topic_tags: true # Add topic tags to the structured database of text chunks
   build_graph_database: false # Build the database of entities and relationships leveraging the chunk database to build a graph RAG
   build_chromadb: false # Build a ChromaDB vector database from the structured database of text chunks
   check_database_quality: false # NOTE: not implemented yet
@@ -61,10 +62,14 @@ split_train_test:
 build_structured_database:
   data_folder_path: 'data' # Path to the folder containing the text files to be processed
   chunk_size: 4000 # Size of the text chunks to be created from the document
-  chunk_overlap: 400 # Overlap between the text chunks
-  output_path: 'graph_rag/structured_database.jsonl' # Path where to save the resulting jsonl file
+  chunk_overlap: 150 # Overlap between the text chunks
+  output_path: &structured_database_path 'graph_rag/structured_database.jsonl' # Path where to save the resulting jsonl file
   clean_text: true # Whether to apply text cleaning heuristics to each chunk
   add_tags: true # Whether to add html style tags to indicate relevant information such as emails, phone numbers, amounts, dates
+
+add_topic_tags:
+  database_path: *structured_database_path # Path to the jsonl file containing the structured database of chunks
+  output_path: 'graph_rag/structured_database_with_topics.jsonl' # Path where to save the resulting jsonl file
 
 build_graph_database:
   database_path: 'graph_rag/structured_database_truncated.jsonl' # Path to the jsonl file containing the structured database of chunks
