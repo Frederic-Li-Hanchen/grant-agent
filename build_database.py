@@ -794,12 +794,14 @@ def create_structured_database_from_bekanntmachungen(data_folder_path: str, chun
 
         # Check if the document is a Bekanntmachung or not
         file_name = os.path.basename(file_path)
-        if "bekanntmachung" in file_name.lower() and not "aenderung" in file_name.lower() and not "vergabe" in file_name.lower():
+        if "bekanntmachung" in file_name.lower() and not "aenderung" in file_name.lower() and not "%C3%84nderung" in file_name and not "vergabe" in file_name.lower() and not 'aufhebung' in file_name.lower() and not "berichtigung" in file_name.lower():
             document_type = "bekanntmachung"
-        elif "aenderung" in file_name.lower():
+        elif "aenderung" in file_name.lower() or "%C3%84nderung" in file_name or "berichtigung" in file_name.lower():
             document_type = "modification"
         elif "vergabe" in file_name.lower():
-            document_type = "grant"
+            document_type = "award"
+        elif "aufhebung" in file_name.lower():
+            document_type = "cancellation"
         else:
             document_type = "other"
 
