@@ -5,7 +5,6 @@ import regex as re
 import os
 from time import sleep, time
 import random  # For random sleep intervals
-from typing import Optional
 from utils import load_config_from_yaml
 from pdb import set_trace as st
 from dotenv import load_dotenv
@@ -20,13 +19,12 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGener
 from google.api_core.exceptions import ResourceExhausted
 from pydantic import BaseModel, Field
 #import vertexai
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import json
 import sys
 import pandas as pd
 from sentence_transformers import SentenceTransformer
 import chromadb
-
 from chromadb.utils import embedding_functions
 
 
@@ -1076,6 +1074,7 @@ def assign_topic_to_chunk(database_path: str, output_path: str):
 # - [str] output_path: path to the jsonl file where the database of entities and relationships should be saved.
 # - [str] prompt_filepath: path to the file containing the LLM prompt for concept extraction.
 # - [str] llm_name: name of the LLM to be used for triplet extraction.
+# - [int] chunk_batch: number of chunks with at least one associated topic to be provided at once to the LLM.
 # - [float] temperature: temperature parameter of the LLM to be used for entity extraction
 # Output:
 # - None
@@ -1084,97 +1083,65 @@ def extract_entities_and_relationships(
         output_path: str, 
         prompt_filepath: str, 
         llm_name: str='gemini-2.5-flash',
+        chunk_batch: int=4,
         temperature: float=0.1):
     
     start_time = time()
     print('\nExtracting entities and relationships from the structured database ...')
 
+    # Define the topics from which related information should be extracted
+    topics = {
+        "objective": "the main topics of the projects to be financed by the call.",
+        "inclusion_criteria": "any criteria that applicants for the call must fulfill.",
+        "exclusion_criteria": "any criteria that prevents applicants from applying to the call.",
+        "deadline": "the deadline before which the applications must be submitted.",
+        "max_funding": "the maximum amount of funding allowed, either per applying participant or consortium.", 
+        "max_duration": "the maximum duration allowed for the project.",
+        "procedure": "the procedure to follow for the submission process.",
+        "contact": "the person(s) or institutions to contact to obtain more information about the call.",
+        "misc": "additional miscelleanous information such as whether de-minimis applies, specified 'Förderquote' (funding rate), geographical restrictions on the exploitation of results."
+    }
+
     # Load the jsonl file containing the chunks
     with open(database_path, 'r', encoding='utf-8') as f:
         chunks_database = f.readlines()
 
+    # Get the list of all Bekanntmachungen file names from the loaded json file
+    file_list = [json.loads(e).get('metadata', {}).get('document_id', None) for e in chunks_database]
+    file_list = list(set(file_list))
+
     # --- Intelligent Resuming Logic ---
-    # Load existing triplets to avoid duplicates if the script is resumed.
-    existing_triplets = set()
+    # Determine all the filenames that are existing in the database
     if os.path.exists(output_path):
         print(f"Output file found at {output_path}. Loading existing triplets to prevent duplicates.")
         with open(output_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                try:
-                    triplet = json.loads(line)
-                    # Create a unique, hashable representation of the triplet
-                    if all(k in triplet for k in ["subject_type", "subject_value", "predicate", "object_type", "object_value"]):
-                        existing_triplets.add((triplet["subject_type"], triplet["subject_value"], triplet["predicate"], triplet["object_type"], triplet["object_value"]))
-                except json.JSONDecodeError:
-                    print(f"Warning: Could not decode line in existing output file: {line.strip()}")
-        print(f"Loaded {len(existing_triplets)} unique existing triplets.")
+            existing_triplets = f.readlines()
+    else:
+        existing_triplets = []
 
-    # Create the document structure triplets by iterating over the chunks
-    document_structure_triplets = []
-    print('Creating the document structure triplets ...')
-    for chunk in chunks_database:
-        chunk_data = json.loads(chunk)
-        # Retrieve the title of the section at the deepest level only
-        titles = chunk_data["metadata"]["section_title"].split("; ")
-        deepest_title = titles[-1] if titles else ""
+    existing_filenames = []
+    for triplet in existing_triplets:
+        current_filename = json.loads(triplet).get('source_document_id', None)
+        if current_filename and current_filename not in existing_filenames:
+            existing_filenames.append(current_filename)
 
-        new_triplet = {
-            "subject_type": "DOCUMENT",
-            "subject_value": chunk_data["metadata"]["document_id"],
-            "predicate": "HAS_SECTION",
-            "object_type": "SECTION",
-            "object_value": deepest_title,
-            "source_document_id": chunk_data["metadata"]["document_id"],
-            "source_section_title": deepest_title,
-            "chunk_id": chunk_data["metadata"]["chunk_id"]
-        }
+    # --- Determine the files to be processed ---
+    files_to_process = [e for e in file_list if e not in existing_filenames]
+    print(f'Found {len(existing_filenames)} existing files and {len(files_to_process)} files to process.')
 
-        # Add triplet only if it's not already in the existing set
-        triplet_key = (new_triplet["subject_type"], new_triplet["subject_value"], new_triplet["predicate"], new_triplet["object_type"], new_triplet["object_value"])
-        if triplet_key not in existing_triplets:
-            document_structure_triplets.append(new_triplet)
-            existing_triplets.add(triplet_key) # Also add to the in-memory set to handle duplicates within the same run
-
-    # Save the document structure triplets in the output jsonl file
-    with open(output_path, 'a', encoding='utf-8') as f:
-        for triplet in document_structure_triplets:
-            json_line = json.dumps(triplet, ensure_ascii=False)
-            f.write(json_line + '\n')
-
-    end_structure = time()
-    print(f"Document structure triplets completed in {end_structure - start_time:.2f} seconds.")
-    
-    # --- Conceptual Triplet Extraction ---
-    # Reload existing triplets to include structural ones and prepare for conceptual triplet resume logic.
-    # We create a set of (doc_id, chunk_id) tuples for which conceptual triplets have already been extracted.
-    processed_chunks = set()
-    if os.path.exists(output_path):
-        with open(output_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                try:
-                    triplet = json.loads(line)
-                    # A conceptual triplet is any triplet that is not structural.
-                    if triplet.get("predicate") != "HAS_SECTION" and "source_document_id" in triplet and "chunk_id" in triplet:
-                        processed_chunks.add((triplet["source_document_id"], triplet["chunk_id"]))
-                except (json.JSONDecodeError, KeyError):
-                    continue # Ignore malformed lines or lines without the required keys
-    # Extracts the conceptual triplets by calling the LLM
-    start_concept = time()
-    print(f'Extracting the conceptual triplets by querying {llm_name} ...')
-    # Initialise the LLM
+    # --- Initialise the LLM for conceptual chunks extraction ---
     load_dotenv()
     graph_rag_api_key = os.getenv("GRAPH_RAG_GEMINI_API_KEY")
     if graph_rag_api_key is None:
         raise ValueError("GRAPH_RAG_GEMINI_API_KEY not found among the environment variables defined in .env")
-
     llm = ChatGoogleGenerativeAI(model=llm_name, temperature=temperature, google_api_key=graph_rag_api_key)
 
-    # Load the prompt template from the provided json file
+    # --- Load the prompt template from the provided json file ---
     with open(prompt_filepath,'r',encoding='utf-8') as f:
         prompt_template_string = json.load(f)['prompt_template']
-
     prompt_template = ChatPromptTemplate.from_template(prompt_template_string)
-    # Define the Pydantic model for the expected output
+
+    # --- Define the Pydantic model for the expected output ---
     class Triplet(BaseModel):
         """A structured representation of a relationship triplet."""
         subject_type: str = Field(description="The type of the subject that takes values among the previously defined entities.")
@@ -1182,6 +1149,7 @@ def extract_entities_and_relationships(
         predicate: str = Field(description="The predicate or type of the relationship.")
         object_type: str = Field(description="The type of the object that takes values among the previously defined entities.")
         object_value: str = Field(description="The value taken by the object, of maximum 3 sentences or 150 words.")
+        chunk_id: str = Field(description="The ID of the chunk the triplet is extracted from.")
     # Define a class that is a triplet list:
     class TripletList(BaseModel):
         triplets: List[Triplet] = Field(description="A list of triplets related to one of the following fields: 'objective', 'inclusion_criteria', 'exclusion_criteria', 'deadline', 'max_funding', 'max_duration', 'procedure', 'contact', 'misc'.")
@@ -1189,56 +1157,106 @@ def extract_entities_and_relationships(
     parser = PydanticOutputParser(pydantic_object=TripletList)
     output_fixing_parser = OutputFixingParser.from_llm(parser=parser, llm=llm)
     chain = (prompt_template | llm | output_fixing_parser)
-
-    # Loop on the chunks of the structured database
-    for i, chunk in enumerate(chunks_database):
-        chunk_data = json.loads(chunk)
-        source_document_id = chunk_data["metadata"]["document_id"]
-        chunk_id = chunk_data["metadata"]["chunk_id"]
-
-        # --- Intelligent Resuming for Conceptual Triplets ---
-        if (source_document_id, chunk_id) in processed_chunks:
-            print(f"Skipping chunk {i+1}/{len(chunks_database)}: Conceptual triplets for doc '{source_document_id}' chunk '{chunk_id}' already exist.")
-            continue
-
-        print(f"Processing chunk {i+1}/{len(chunks_database)}: doc '{source_document_id}' chunk '{chunk_id}'")
-
-        # Retrieve the title of the section at the deepest level only
-        titles = chunk_data["metadata"]["section_title"].split("; ")
-        deepest_title = titles[-1] if titles else ""
-
-        # Prompt input
-        prompt_input = {
-            "document_title": chunk_data["metadata"]["document_id"],
-            "section_title": chunk_data["metadata"]["section_title"],
-            "text": chunk_data["text"],
-            "format_instructions": parser.get_format_instructions(),
-        }
-        try:
-            # The parser returns a Pydantic object. It might be None if the LLM returns nothing.
-            result_triplet_list = chain.invoke(prompt_input)
-            
-            if result_triplet_list and result_triplet_list.triplets:
-                for triplet in result_triplet_list.triplets:
-                    new_triplet = triplet.dict() # Convert Pydantic model to dictionary
-                    new_triplet["source_document_id"] = source_document_id
-                    new_triplet["source_section_title"] = deepest_title
-                    new_triplet["chunk_id"] = chunk_id
-                    # Save the new triplet in the output jsonl file
-                    with open(output_path, 'a', encoding='utf-8') as f:
-                        json_line = json.dumps(new_triplet, ensure_ascii=False)
-                        f.write(json_line + '\n')
-            else:
-                print(f"  - No conceptual triplet found for chunk {chunk_id} of document {source_document_id}.")
-        except ResourceExhausted as e:
-            print(f"  - Resource exhausted for chunk {chunk_id}. Waiting 60 seconds before retrying. Error: {e}")
-            sleep(60)
-            # You might want to re-add the chunk to a queue to retry later
-        except Exception as e:
-            print(f"  - Error generating conceptual triplet for chunk {chunk_id} of document {source_document_id}: {e}. Skipping.")
-    end_concept = time()
-    print(f"Conceptual triplets completed in {end_concept - start_concept:.2f} seconds.")
-    print(f"Entities and relationships extracted and saved in {output_path} in {end_concept - start_time:.2f} seconds.\n")
+    
+    # --- Iterate over the documents to process ---
+    for file_idx, file_name in enumerate(files_to_process):
+        file_start_time = time()
+        # --- Retrieve the chunks that are associated with the file ---
+        chunks_for_current_file = [json.loads(e) for e in chunks_database if json.loads(e).get('metadata', {}).get('document_id', None) == file_name]
+        # --- Extract the document structure triplets ---
+        document_structure_triplets = []
+        already_seen = []
+        for chunk in chunks_for_current_file:
+            # Retrieve the title of the section at the deepest level only
+            titles = chunk["metadata"]["section_title"].split("; ")
+            deepest_title = titles[-1] if titles else ""
+            if not deepest_title in already_seen:
+                already_seen.append(deepest_title)
+                new_triplet = {
+                    "subject_type": "DOCUMENT",
+                    "subject_value": chunk["metadata"]["document_id"],
+                    "predicate": "HAS_SECTION",
+                    "object_type": "SECTION",
+                    "object_value": deepest_title,
+                    #"source_document_id": chunk["metadata"]["document_id"],
+                    #"source_section_title": deepest_title,
+                    #"chunk_id": chunk["metadata"]["chunk_id"]
+                    "chunk_id": chunk["metadata"]["id"]
+                }
+                document_structure_triplets.append(new_triplet)
+        # --- Extract the conceptual chunks ---
+        conceptual_triplets = []
+        # Among the chunks of the document, keep only the ones that have a non-empty "topics" in "metadata"
+        chunks_for_current_file_with_topics = [e for e in chunks_for_current_file if e.get('metadata', {}).get('topics', None)]
+        # Loop on the chunks by agregating them by batches of chunk_batch
+        if chunks_for_current_file_with_topics:
+            idx = 0
+            while idx < len(chunks_for_current_file_with_topics):
+                end_idx = min(idx+chunk_batch, len(chunks_for_current_file_with_topics))
+                current_chunks = chunks_for_current_file_with_topics[idx:end_idx]
+                # Retrieve all information required to be input to the prompt
+                document_title = current_chunks[0]["metadata"]["document_id"] # The document title is the same for all chunks
+                current_topics = [] # The different topics that are contained in the chunks
+                current_section_titles = [] # The different section titles
+                current_chunk_id = [] # The different chunk IDs
+                for chunk in current_chunks:
+                    titles = chunk["metadata"]["section_title"].split("; ")
+                    deepest_title = titles[-1] if titles else ""
+                    current_topics += chunk["metadata"]["topics"]
+                    current_section_titles.append(deepest_title)
+                    current_chunk_id.append(chunk["metadata"]["id"])
+                # Remove duplicated topics
+                current_topics = list(set(current_topics))
+                # Build the list of topics in a single string with proper list formatting
+                formatted_topic_list = "\n".join([f"- **{topic}**: {topics[topic]}" for topic in current_topics])
+                # Building the text of the chunks in a single string with proper markdown formatting
+                formatted_chunk_text = "\n"
+                for chunk_nb, chunk in enumerate(current_chunks):
+                    formatted_chunk_text += f"\n**Chunk {chunk_nb}**\n*Chunk ID:* {current_chunk_id[chunk_nb]}\n*Section title:* {current_section_titles[chunk_nb]}\n*Text:* {chunk['text']}\n\n---\n"
+                formatted_chunk_text += "\n"
+                # Create the prompt input
+                prompt_input = {
+                    "nb_chunks": len(current_chunks),
+                    "topic_list": formatted_topic_list,
+                    "max_nb_chunks": "seven", # NOTE: change to be dependent on nb_chunks?
+                    "document_title": document_title,
+                    "chunk_data": formatted_chunk_text,
+                    "format_instructions": parser.get_format_instructions(),
+                }
+                # Call the LLM with the defined prompt
+                try:
+                    # The parser returns a Pydantic object. It might be None if the LLM returns nothing.
+                    result_triplet_list = chain.invoke(prompt_input)
+                    
+                    if result_triplet_list and result_triplet_list.triplets:
+                        for triplet in result_triplet_list.triplets:
+                            new_triplet = triplet.dict() # Convert Pydantic model to dictionary
+                            # Save the new triplet in the output jsonl file
+                            with open(output_path, 'a', encoding='utf-8') as f:
+                                json_line = json.dumps(new_triplet, ensure_ascii=False)
+                                f.write(json_line + '\n')
+                    else:
+                        print(f"  - No conceptual triplet found for chunks {idx+1} to {idx+chunk_batch} of document {document_title}.")
+                except ResourceExhausted as e:
+                    print(f"  - Resource exhausted for chunks {idx+1} to {idx+chunk_batch} of document {document_title}. Waiting 60 seconds before retrying. Error: {e}")
+                    sleep(60)
+                    # You might want to re-add the chunk to a queue to retry later
+                except Exception as e:
+                    print(f"  - Error generating conceptual triplet for chunks {idx+1} to {idx+1+chunk_batch} of document {document_title}: {e}. Skipping.")
+                # Increment the batch index
+                idx += chunk_batch
+            # --- Save all triplets extracted for the current document ---
+            with open(output_path, 'a', encoding='utf-8') as output_file:
+                for triplet in document_structure_triplets:
+                    json_line = json.dumps(triplet, ensure_ascii=False)
+                    output_file.write(json_line + '\n')
+                for triplet in conceptual_triplets:
+                    json_line = json.dumps(triplet, ensure_ascii=False)
+                    output_file.write(json_line + '\n')
+        file_end_time = time()
+        print(f'Processed file {file_idx+1}/{len(files_to_process)} ({file_name}) in {file_end_time-file_start_time:.2f} seconds')
+    end_time = time()
+    print(f"Entities and relationships extracted and saved in {output_path} in {end_time - start_time:.2f} seconds.\n")
 
 
 ### Function that builds a ChromaDB structured database from the structured database
@@ -1420,6 +1438,7 @@ if __name__ == "__main__":
             output_path=parameters.get('output_path'),
             llm_name=parameters.get('llm_name','models/embedding-001'),
             prompt_filepath=parameters.get('prompt_filepath'),
+            chunk_batch=parameters.get('chunk_batch',4),
             temperature=parameters.get('temperature',0.1)
         )
 

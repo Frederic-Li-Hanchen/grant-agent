@@ -7,8 +7,8 @@ run_steps:
   split_train_test: false # Split the training and testing sets for supervised fine-tuning using HuggingFace
   compute_huggingface_inferences: false # Get inferences from a HuggingFace model given a labelled dataset
   build_structured_database: false # Build a structured database of text chunks from the Bekanntmachungen documents to train a graph RAG model
-  add_topic_tags: true # Add topic tags to the structured database of text chunks
-  build_graph_database: false # Build the database of entities and relationships leveraging the chunk database to build a graph RAG
+  add_topic_tags: false # Add topic tags to the structured database of text chunks
+  build_graph_database: true # Build the database of entities and relationships leveraging the chunk database to build a graph RAG
   build_chromadb: false # Build a ChromaDB vector database from the structured database of text chunks
   check_database_quality: false # NOTE: not implemented yet
   create_ground_truth: false # NOTE: not implemented yet
@@ -73,9 +73,10 @@ add_topic_tags:
 
 build_graph_database:
   database_path: 'graph_rag/structured_database_truncated.jsonl' # Path to the jsonl file containing the structured database of chunks
-  output_path: 'graph_rag/graph_database_truncated_v9.jsonl' # Path where to save the resulting jsonl file
+  output_path: 'graph_rag/graph_database_truncated_v11.jsonl' # Path where to save the resulting jsonl file
   llm_name: 'gemini-2.5-flash' # Name of the LLM to be used for concept extraction
   prompt_filepath: 'prompts/graph_rag_entity_extraction.json' # Path to the json file containing the prompt
+  chunk_batch: 4 # Number of chunks with at least one associated topic to be provided at once to the LLM
   temperature: 0.1 # Temperature parameter for the LLM
 
 build_chromadb:
