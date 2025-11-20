@@ -72,12 +72,12 @@ add_topic_tags:
   output_path: 'graph_rag/structured_database_with_topics.jsonl' # Path where to save the resulting jsonl file
 
 build_graph_database:
-  database_path: 'graph_rag/structured_database_truncated.jsonl' # Path to the jsonl file containing the structured database of chunks
-  output_path: 'graph_rag/graph_database_truncated_v11.jsonl' # Path where to save the resulting jsonl file
+  database_path: 'graph_rag/structured_database_with_topics.jsonl' # Path to the jsonl file containing the structured database of chunks
+  output_path: 'graph_rag/graph_database.jsonl' # Path where to save the resulting jsonl file
   llm_name: 'gemini-2.5-flash' # Name of the LLM to be used for concept extraction
   prompt_filepath: 'prompts/graph_rag_entity_extraction.json' # Path to the json file containing the prompt
   chunk_batch: 4 # Number of chunks with at least one associated topic to be provided at once to the LLM
-  temperature: 0.1 # Temperature parameter for the LLM
+  temperature: 0 # Temperature parameter for the LLM
 
 build_chromadb:
   database_path: 'graph_rag/structured_database.jsonl' # Path to the jsonl file containing the structured database of chunks

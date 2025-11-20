@@ -26,6 +26,7 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 import chromadb
 from chromadb.utils import embedding_functions
+from math import floor
 
 
 # =================================================
@@ -1127,6 +1128,7 @@ def extract_entities_and_relationships(
 
     # --- Determine the files to be processed ---
     files_to_process = [e for e in file_list if e not in existing_filenames]
+    files_to_process.sort()
     print(f'Found {len(existing_filenames)} existing files and {len(files_to_process)} files to process.')
 
     # --- Initialise the LLM for conceptual chunks extraction ---
@@ -1218,7 +1220,7 @@ def extract_entities_and_relationships(
                 prompt_input = {
                     "nb_chunks": len(current_chunks),
                     "topic_list": formatted_topic_list,
-                    "max_nb_chunks": "seven", # NOTE: change to be dependent on nb_chunks?
+                    "max_nb_chunks": floor(2.5*len(current_topics)),
                     "document_title": document_title,
                     "chunk_data": formatted_chunk_text,
                     "format_instructions": parser.get_format_instructions(),
@@ -1230,7 +1232,7 @@ def extract_entities_and_relationships(
                     
                     if result_triplet_list and result_triplet_list.triplets:
                         for triplet in result_triplet_list.triplets:
-                            new_triplet = triplet.dict() # Convert Pydantic model to dictionary
+                            new_triplet = triplet.model_dump() # Convert Pydantic model to dictionary
                             # Save the new triplet in the output jsonl file
                             with open(output_path, 'a', encoding='utf-8') as f:
                                 json_line = json.dumps(new_triplet, ensure_ascii=False)

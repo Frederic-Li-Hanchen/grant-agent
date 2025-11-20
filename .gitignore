@@ -10,6 +10,7 @@ supervised_fine_tuning/
 graph_rag/
 chroma_db/
 notes/
+logs/
 .env
 .venv
 venv/
