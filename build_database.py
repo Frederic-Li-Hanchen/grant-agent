@@ -1122,7 +1122,10 @@ def extract_entities_and_relationships(
 
     existing_filenames = []
     for triplet in existing_triplets:
-        current_filename = json.loads(triplet).get('source_document_id', None)
+        current_chunk_id = json.loads(triplet).get('chunk_id', None)
+        # Extract filename from chunk_id
+        pos = current_chunk_id.find('_sec')
+        current_filename = current_chunk_id[:pos]+'.txt'
         if current_filename and current_filename not in existing_filenames:
             existing_filenames.append(current_filename)
 
@@ -1180,9 +1183,6 @@ def extract_entities_and_relationships(
                     "predicate": "HAS_SECTION",
                     "object_type": "SECTION",
                     "object_value": deepest_title,
-                    #"source_document_id": chunk["metadata"]["document_id"],
-                    #"source_section_title": deepest_title,
-                    #"chunk_id": chunk["metadata"]["chunk_id"]
                     "chunk_id": chunk["metadata"]["id"]
                 }
                 document_structure_triplets.append(new_triplet)
