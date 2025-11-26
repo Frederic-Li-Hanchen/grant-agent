@@ -1261,6 +1261,28 @@ def extract_entities_and_relationships(
     print(f"Entities and relationships extracted and saved in {output_path} in {end_time - start_time:.2f} seconds.\n")
 
 
+### Helper function that converts the list of topics into a one-hot vector representation so that it can be added to the ChromaDB metadata
+# Input:
+# - [List[str]] topic_list: a list of the topics associated to a given text chunk (can be empty)
+# Output:
+# - [Dict] output_dict: a dictionary with keys corresponding to each topic, and value 0 or 1 depending on whether the topic is associated to the chunk
+def get_topic_dict(topic_list: List[str]) -> Dict:
+    output_dict = {
+        'objective': 0,
+        'inclusion_criteria': 0,
+        'exclusion_criteria': 0,
+        'deadline': 0,
+        'max_funding': 0,
+        'max_duration': 0,
+        'procedure': 0,
+        'contact': 0,
+        'misc': 0
+    }
+    for topic in topic_list:
+        output_dict[topic] = 1
+    return output_dict
+
+
 ### Function that builds a ChromaDB structured database from the structured database
 # Input:
 # - [str] database_path: path to the jsonl file containing the structured database of chunks
@@ -1324,7 +1346,15 @@ def build_chromadb(
 
         # Prepare the data for the current batch
         texts = [f"Document Type: {entry['metadata']['document_type']}. Section Title: {entry['metadata']['section_title']}. Text: {entry['text']}" for entry in batch_data]
-        metadatas = [entry['metadata'] for entry in batch_data]
+        #metadatas = [entry['metadata'] for entry in batch_data]
+        # Get the list of metadata with the list of topics converted into dictionary
+        metadatas = []
+        for entry in batch_data:
+            metadata_tmp = entry['metadata']
+            topics = metadata_tmp.pop('topics', None)
+            entry['metadata'] = {**metadata_tmp, **get_topic_dict(topics)}
+            metadatas.append(entry['metadata'])
+        # Get the list of IDs
         ids = [entry['metadata']['id'] for entry in batch_data]
 
         # Add the batch to the collection
