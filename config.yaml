@@ -5,10 +5,10 @@ run_steps:
   build_database: false # Build the database of Bekanntmachungen by scraping the BMBF website
   build_sft_dataset: false # Build the training database with relevant document chunks for each prompt in the training data
   split_train_test: false # Split the training and testing sets for supervised fine-tuning using HuggingFace
-  compute_huggingface_inferences: false # Get inferences from a HuggingFace model given a labelled dataset
+  compute_huggingface_inferences: true # Get inferences from a HuggingFace model given a labelled dataset
   build_structured_database: false # Build a structured database of text chunks from the Bekanntmachungen documents to train a graph RAG model
   add_topic_tags: false # Add topic tags to the structured database of text chunks
-  build_graph_database: true # Build the database of entities and relationships leveraging the chunk database to build a graph RAG
+  build_graph_database: false # Build the database of entities and relationships leveraging the chunk database to build a graph RAG
   build_chromadb: false # Build a ChromaDB vector database from the structured database of text chunks
   check_database_quality: false # NOTE: not implemented yet
   create_ground_truth: false # NOTE: not implemented yet
@@ -72,15 +72,15 @@ add_topic_tags:
   output_path: 'graph_rag/structured_database_with_topics.jsonl' # Path where to save the resulting jsonl file
 
 build_graph_database:
-  database_path: 'graph_rag/structured_database_with_topics.jsonl' # Path to the jsonl file containing the structured database of chunks
-  output_path: 'graph_rag/graph_database.jsonl' # Path where to save the resulting jsonl file
+  database_path: 'graph_rag/structured_database_truncated.jsonl' # Path to the jsonl file containing the structured database of chunks
+  output_path: 'graph_rag/graph_database_truncated_v11.jsonl' # Path where to save the resulting jsonl file
   llm_name: 'gemini-2.5-flash' # Name of the LLM to be used for concept extraction
   prompt_filepath: 'prompts/graph_rag_entity_extraction.json' # Path to the json file containing the prompt
   chunk_batch: 4 # Number of chunks with at least one associated topic to be provided at once to the LLM
   temperature: 0 # Temperature parameter for the LLM
 
 build_chromadb:
-  database_path: 'graph_rag/structured_database.jsonl' # Path to the jsonl file containing the structured database of chunks
+  database_path: 'graph_rag/structured_database_with_topics.jsonl' # Path to the jsonl file containing the structured database of chunks
   chroma_db_path: 'chroma_db' # Path where to save the ChromaDB database
   embedding_model_path: 'sentence-transformers/paraphrase-multilingual-mpnet-base-v2' # Path to the embedding model to be used
   batch_size: 500 # Number of database entries to process in each batch
@@ -91,9 +91,10 @@ build_chromadb:
 # =============================
 compute_huggingface_inferences:
   dataset_path: 'supervised_fine_tuning/test_dataset.csv' # Path to the CSV file containing the dataset to be used for inference
-  model_name: 'TheBloke/Mistral-7B-Instruct-v0.2-GGUF' # Name of the model to use for inference
-  output_dir: 'supervised_fine_tuning/test_inference_base' # Path where to save the inferences in json format, one per file
+  model_name: 'frederic-li-hanchen/bekanntmachung-llm-v1' # Name of the model to use for inference | base Mistral-7B-Instruct-v0.2-GGUF: 'TheBloke/Mistral-7B-Instruct-v0.2-GGUF'
+  output_dir: 'supervised_fine_tuning/test_inference_fine_tuning' # Path where to save the inferences in json format, one per file
   max_new_tokens: 1024 # Maximum number of tokens for the inference
+  autotrain_base_model_name: 'mistralai/Mistral-7B-Instruct-v0.2' # Base model name to be used if the model is from AutoTrain
 
 # =================================
 # === Agent Evaluation Settings ===

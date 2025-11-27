@@ -6,8 +6,13 @@ from pdb import set_trace as st
 from time import time
 from dotenv import load_dotenv
 from utils import load_config_from_yaml
-from ctransformers import AutoModelForCausalLM
+from ctransformers import AutoModelForCausalLM as CTransformersAutoModel
 import torch # Still needed for dtype conversion logic
+from transformers import AutoTokenizer, AutoModelForCausalLM, StoppingCriteria, StoppingCriteriaList
+from peft import PeftModel
+import warnings
+# Filter warnings about torch and peft conflicts
+warnings.filterwarnings("ignore", category=UserWarning, message=".*copying from a non-meta parameter.*")
 
 
 ### Function to compute the inference on the test set using HuggingFace and save them in the format required for evaluation (one json file with all fields per Bekanntmachung)
@@ -16,6 +21,7 @@ import torch # Still needed for dtype conversion logic
 # - [str] model_name: name or path of the HuggingFace model to use for inference.
 # - [str] output_dir: directory where the output JSON files will be saved.
 # - [int] max_new_tokens: maximum number of new tokens to generate for each inference.
+# - [bool] from_autotrain: whether the model to use was fine-tuned with AutoTrain or not 
 # Output:
 # - None
 def get_huggingface_inferences(
@@ -23,6 +29,7 @@ def get_huggingface_inferences(
     model_name: str,
     output_dir: str,
     max_new_tokens: int = 1024,
+    autotrain_base_model_name: str = '',
 ) -> None:
     """
     Computes inferences for a test set using a HuggingFace model and saves the results.
@@ -35,6 +42,8 @@ def get_huggingface_inferences(
         dataset_path (str): Path to the input CSV dataset.
                               The CSV must contain "file_path", "field", and "text" columns.
         model_name (str): The name or path of the HuggingFace model to use for inference.
+                          For AutoTrain, this is the adapter model name.
+        base_model_name (str): The name of the base model for AutoTrain adapters.
         output_dir (str): The directory where the output JSON files will be saved.
         max_new_tokens (int): The maximum number of new tokens to generate for each inference.
     """
@@ -64,23 +73,71 @@ def get_huggingface_inferences(
     # Ensure the output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
-    # Load the quantized model using ctransformers
-    # This is much more memory-efficient for CPU inference.
-    try:
-        print("Loading quantized model for inference...")
-        # For CPU, we don't offload to GPU. For GPU, -1 means all layers.
-        gpu_layers = 50 if torch.cuda.is_available() else 0
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            model_type="mistral",
-            gpu_layers=gpu_layers,
-            # Increase context length if your prompts are very long
-            context_length=8192 
-        )
-        print(f"Successfully loaded quantized model '{model_name}'.")
-    except Exception as e:
-        print(f"Error loading model or tokenizer: {e}")
-        return
+    # Load the quantized model using ctransformers in the case of a model not from AutoTrain
+    from_autotrain = bool(autotrain_base_model_name)
+    if not from_autotrain:
+        try:
+            print("Loading quantized model for inference...")
+            # For CPU, we don't offload to GPU. For GPU, -1 means all layers.
+            gpu_layers = 50 if torch.cuda.is_available() else 0
+            model = CTransformersAutoModel.from_pretrained(
+                model_name,
+                model_type="mistral",
+                gpu_layers=gpu_layers,
+                # Increase context length if your prompts are very long
+                context_length=8192 
+            )
+            print(f"Successfully loaded quantized model '{model_name}'.")
+        except Exception as e:
+            print(f"Error loading model or tokenizer: {e}")
+            return
+    else: # The model was fine-tuned with AutoTrain, requiring base model + LoRA adapter
+        try:
+            print(f"Loading base model '{autotrain_base_model_name}' for AutoTrain adapter...")
+            # Load the base model and tokenizer from the transformers library
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+            # --- Critical fix for RecursionError ---
+            # Set the padding token to the EOS token if it's not already set.
+            # This is crucial for the model.generate() function to have a proper stopping criterion.
+            tokenizer.pad_token = tokenizer.eos_token
+            
+            # Try loading with bfloat16 first, as it's common for modern LLMs and LoRA adapters
+            try:
+                model = AutoModelForCausalLM.from_pretrained(
+                    autotrain_base_model_name,
+                    device_map='auto',
+                    torch_dtype=torch.bfloat16, # Use bfloat16 for better performance and compatibility
+                    trust_remote_code=True
+                )
+            except Exception as e:
+                print(f"Warning: Could not load with bfloat16 ({e}). Trying with float16...")
+                # Fallback to float16 if bfloat16 is not supported or causes issues
+                model = AutoModelForCausalLM.from_pretrained(
+                    autotrain_base_model_name,
+                    device_map='auto',
+                    torch_dtype=torch.float16, # Fallback to float16
+                    trust_remote_code=True
+                )
+
+            print(f"Loading and applying LoRA adapter '{model_name}'...")
+            # Apply the LoRA adapter to the base model
+            peft_model = PeftModel.from_pretrained(model, model_name, is_trainable=True)
+            print("Successfully loaded AutoTrain model.")
+
+        except Exception as e:
+            print(f"Error loading model or tokenizer: {e}")
+            return
+
+    # Define a custom stopping criteria class to prevent recursion errors
+    class EosTokenStoppingCriteria(StoppingCriteria):
+        def __init__(self, eos_token_id: int):
+            self.eos_token_id = eos_token_id
+
+        def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> bool:
+            # Check if the last generated token is the EOS token
+            last_token = input_ids[0, -1].item()
+            return last_token == self.eos_token_id
 
     # --- 2. Inference Loop ---
     # Group samples by the original file path to create one JSON per file
@@ -112,16 +169,28 @@ def get_huggingface_inferences(
             # The prompt is the "human" part of the text
             prompt = row["text"].split("\n bot:")[0]
 
-            # Generate the output from the model
-            # Explicitly set stream=False to ensure a string is returned.
-            # The stop argument prevents the model from hallucinating the next user turn.
-            output = model(prompt, max_new_tokens=max_new_tokens, stop=["human:"], stream=False)
-            
-            # The output should be a string, but we handle the generator case for robustness.
-            if isinstance(output, str):
+            if not from_autotrain:
+                # Generate the output from the GGUF model
+                output = model(prompt, max_new_tokens=max_new_tokens, stop=["human:"], stream=False)
                 results_for_file[field] = output.strip()
-            else: # It's a generator (from streaming)
-                results_for_file[field] = "".join(output).strip()
+            else:
+                # Generate output for the transformers-based AutoTrain model
+                # The stop argument is handled differently here
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                inputs = tokenizer(prompt, return_tensors="pt").to(device)
+                
+                # Create a stopping criteria list
+                stopping_criteria = StoppingCriteriaList([EosTokenStoppingCriteria(tokenizer.eos_token_id)])
+
+                output_ids = peft_model.generate(
+                    **inputs, 
+                    max_new_tokens=max_new_tokens,
+                    stopping_criteria=stopping_criteria,
+                    pad_token_id=tokenizer.eos_token_id # Keep this for padding
+                )
+                response = tokenizer.decode(output_ids[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+                results_for_file[field] = response.strip()
+
             print(f"  - Generated answer for field: '{field}'")
             
             # --- 3. Save Results Incrementally ---
@@ -160,7 +229,8 @@ if __name__ == "__main__":
 
         get_huggingface_inferences(
             dataset_path=params['dataset_path'],
-            model_name=model_name,
+            model_name=params.get('model_name'),
             output_dir=params['output_dir'],
             max_new_tokens=params['max_new_tokens'],
+            autotrain_base_model_name=params.get('autotrain_base_model_name'),
         )
