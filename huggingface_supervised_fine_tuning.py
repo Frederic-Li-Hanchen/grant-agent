@@ -189,6 +189,11 @@ def get_huggingface_inferences(
                     pad_token_id=tokenizer.eos_token_id # Keep this for padding
                 )
                 response = tokenizer.decode(output_ids[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+                # Remove the "\n bot:" or "bot:" prefix if any.
+                if response.startswith("bot:"):
+                    response = response[len("bot:"):]
+                elif response.startswith("\n bot:"):
+                    response = response[len("\n bot:"):]
                 results_for_file[field] = response.strip()
 
             print(f"  - Generated answer for field: '{field}'")
