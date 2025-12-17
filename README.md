@@ -10,4 +10,5 @@ Repository contents:
 - evaluate_agent.py: script to evaluate the outputs produced by the agent using various evaluation strategies and plot the results 
 - huggingface_supervised_fine_tuning.py: script to fine-tune a LLM on annotated data using HuggingFace
 - utils.py: script containing helper functions
-- ./prompts/: folder containing json files with template information for prompts 
+- prompts/: folder containing json files with template information for prompts 
+- pyproject.toml and uv.lock: files containing requirements for Python libraries dependencies
