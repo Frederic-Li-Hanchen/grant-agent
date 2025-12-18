@@ -19,3 +19,4 @@ __pycache__/
 test.py
 *notes.txt
 *.zip
+requirements.txt

@@ -9,9 +9,9 @@ from utils import load_config_from_yaml
 from pdb import set_trace as st
 from dotenv import load_dotenv
 from langchain_community.vectorstores import DocArrayInMemorySearch
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain.output_parsers import PydanticOutputParser, OutputFixingParser
+from langchain_core.output_parsers import PydanticOutputParser
 from langchain_community.document_loaders import PyPDFLoader, UnstructuredPDFLoader, TextLoader
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
@@ -1159,9 +1159,17 @@ def extract_entities_and_relationships(
     class TripletList(BaseModel):
         triplets: List[Triplet] = Field(description="A list of triplets related to one of the following fields: 'objective', 'inclusion_criteria', 'exclusion_criteria', 'deadline', 'max_funding', 'max_duration', 'procedure', 'contact', 'misc'.")
     # Define the chain to parse a list of triplets
-    parser = PydanticOutputParser(pydantic_object=TripletList)
-    output_fixing_parser = OutputFixingParser.from_llm(parser=parser, llm=llm)
-    chain = (prompt_template | llm | output_fixing_parser)
+    parser = PydanticOutputParser(pydantic_object=TripletList)    
+    # Create a chain with a fallback for parsing errors.
+    # If the initial parsing fails, it passes the output and the error to a fixing chain.
+    fixing_prompt_template = ChatPromptTemplate.from_template(
+        "Fix the following output to conform to the format instructions. Do not add any other text.\n\n"
+        "FORMAT INSTRUCTIONS:\n{format_instructions}\n\n"
+        "FAILED OUTPUT:\n{completion}\n\n"
+        "ERROR:\n{error}"
+    )
+    fixing_chain = fixing_prompt_template | llm | parser
+    chain = (prompt_template | llm | parser).with_fallbacks(fallbacks=[fixing_chain], exception_key="error", input_key="completion")
     
     # --- Iterate over the documents to process ---
     for file_idx, file_name in enumerate(files_to_process):

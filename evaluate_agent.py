@@ -8,14 +8,14 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 #from langchain.chains import SimpleSequentialChain, LLMChain
 from langchain_core.language_models import BaseLanguageModel
-from langchain.prompts import ChatPromptTemplate
-from langchain.output_parsers import PydanticOutputParser, OutputFixingParser
+from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
+from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.exceptions import OutputParserException
 #from langchain.chat_models import ChatOpenAI
 from dotenv import load_dotenv
 from typing import List, Dict
 from pydantic import BaseModel, Field
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 #import tenacity
@@ -102,8 +102,12 @@ def compute_metrics(gt_path: str, gen_path: str, output_filepath: str) -> None:
             prediction = re.sub(r'\s+', ' ', prediction) # Collapse multiple spaces into one
             prediction = prediction.replace("Not specified.", "Not specified").strip() # Replace "Not specified." with "Not specified"
 
-            # Compute BLEU score| NOTE: for single words, BLEU will return 0 even if the generated answer matches the ground truth
-            bleu_result = bleu_metric.compute(predictions=[prediction], references=[[reference]])
+            # Compute BLEU score. Handle the edge case where the prediction is an empty
+            # string, which would cause a ZeroDivisionError. In this case, the score is 0.
+            if not prediction:
+                bleu_result = {'bleu': 0.0}
+            else:
+                bleu_result = bleu_metric.compute(predictions=[prediction], references=[[reference]])
             assert bleu_result is not None, f"BLEU score is None for {gt_file} on key {key}"
             results.append({'file': gt_file, 'field': key, 'metric': 'BLEU', 'score': bleu_result['bleu']})
 
@@ -432,7 +436,8 @@ def llm_as_a_judge_evaluation(
     
     # Use a self-correcting parser that can fix malformed JSON from the LLM
     parser = PydanticOutputParser(pydantic_object=JudgeOutput)
-    output_fixing_parser = OutputFixingParser.from_llm(parser=parser, llm=llm)
+    #output_fixing_parser = OutputFixingParser.from_llm(parser=parser, llm=llm)
+
     # Define the Langchain prompt template that include all evaluation criteria to be scored by the LLM
     prompt = ChatPromptTemplate.from_messages([
         ("system", 
@@ -501,9 +506,20 @@ def llm_as_a_judge_evaluation(
                 print(f"  Error reading JSON for {gt_file}: {e}. Skipping.")
                 continue
 
-            # Create a robust chain with the fixing parser and automatic retries
-            # on transient errors like server overload or network issues.
-            chain = (prompt | llm | output_fixing_parser).with_retry(
+            # Create a chain with a fallback for parsing errors.
+            # If the initial parsing fails, it passes the output and the error to a fixing chain.
+            fixing_prompt_template = PromptTemplate.from_template(
+                "Fix the following output to conform to the format instructions. Do not add any other text.\n\n"
+                "FORMAT INSTRUCTIONS:\n{format_instructions}\n\n"
+                "FAILED OUTPUT:\n{completion}\n\n"
+                "ERROR:\n{error}"
+            )
+            fixing_chain = fixing_prompt_template | llm | parser
+            chain = (prompt | llm | parser).with_fallbacks(
+                fallbacks=[fixing_chain],
+                exception_key="error",
+                input_key="completion"
+            ).with_retry(
                 stop_after_attempt=3,
                 wait_exponential_jitter=True,
                 retry_if_exception_type=(groq.APIStatusError, requests.exceptions.RequestException)
