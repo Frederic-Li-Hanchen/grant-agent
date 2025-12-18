@@ -28,6 +28,8 @@ import sys
 import numpy as np
 from utils import spearman_corr_custom
 from utils import load_config_from_yaml
+import torch
+from BARTScore.bart_score import BARTScorer
 from pdb import set_trace as st # For debugging purposes
 
 
@@ -70,6 +72,12 @@ def compute_metrics(gt_path: str, gen_path: str, output_filepath: str) -> None:
     # Load metric calculators once for efficiency
     bleu_metric = evaluate.load("bleu")
     rouge_metric = evaluate.load("rouge")
+
+    # Initialise the BARTScorer, dynamically selecting the device
+    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    print(f"Initializing BARTScorer on device: {device}")
+    scorer = BARTScorer(device=device, checkpoint='facebook/bart-large-cnn')
+    scorer.load(path='BARTScore/bart_score.pth')
 
     # Loop on the files
     for gt_file, gen_file in zip(gt_files, gen_files):
@@ -121,6 +129,12 @@ def compute_metrics(gt_path: str, gen_path: str, output_filepath: str) -> None:
             _, _, bert_f1 = bert_score.score([prediction], [[reference]], lang='en', verbose=False)
             results.append({'file': gt_file, 'field': key, 'metric': 'BertScore_F1', 'score': bert_f1.item()})
 
+            # Compute BartScore
+            score1 = scorer.score(srcs=[reference], tgts=[prediction])[0]
+            score2 = scorer.score(srcs=[prediction], tgts=[reference])[0]
+            score = (score1+score2)/2
+            results.append({'file': gt_file, 'field': key, 'metric': 'BartScore', 'score': score})
+
     if results:
         metrics_df = pd.DataFrame(results)
         # Ensure output directory exists
@@ -150,90 +164,116 @@ def plot_metrics(csv_filepath: str, output_folder_path: str) -> None:
     # Load the metrics from the CSV file
     metrics_df = pd.read_csv(csv_filepath)
 
-    # Define the order of metrics and fields for consistent plotting
-    metric_order = ['BLEU', 'ROUGE-1', 'BertScore_F1']
+    # Define the order of metrics and fields for consistent plotting.
+    # BartScore is now included.
+    metric_order = ['BLEU', 'ROUGE-1', 'BertScore_F1', 'BartScore']
     field_order = ["objective", "inclusion_criteria", "exclusion_criteria", "deadline", 
                    "max_funding", "max_duration", "procedure", "contact", "misc"]
     
     # Filter the DataFrame to only include the metrics we want to plot
     # and ensure the 'metric' column is categorical to respect the order
     metrics_df = metrics_df[metrics_df['metric'].isin(metric_order)].copy()
+
     if metrics_df.empty:
         print("No metrics found in the CSV to plot.")
         return
+        
     metrics_df['metric'] = pd.Categorical(metrics_df['metric'], categories=metric_order, ordered=True)
 
-    # Define colors for each metric
-    colors = {'BLEU': 'blue', 'ROUGE-1': 'red', 'BertScore_F1': 'green'}
+    # Define a color mapping for the metrics
+    palette = {'BLEU': 'blue', 'ROUGE-1': 'red', 'BertScore_F1': 'green', 'BartScore': 'purple'}
 
-    # --- Create Box Plot ---
-    fig, ax = plt.subplots(figsize=(20, 10))
-    
-    sns.boxplot(
+    # --- Create Faceted Box Plot ---
+    # Use catplot to create faceted plots, with each metric in its own subplot.
+    # This handles different y-axis scales gracefully.
+    g = sns.catplot(
         data=metrics_df,
         x='field', 
         y='score', 
-        hue='metric',
+        col='metric',  # Create a column of subplots for each metric
+        kind='box',    # Specify the plot kind
         order=field_order,
-        hue_order=metric_order,
-        palette=colors,
-        ax=ax
+        col_wrap=2,    # Wrap the subplots into 2 columns
+        sharex=True,   # Share the x-axis labels
+        sharey=False,  # Each subplot has its own y-axis scale
+        height=5, 
+        aspect=1.5
     )
     
-    # Set plot titles and labels
-    ax.set_title('Metric Score Distributions by Field', fontsize=16, pad=15)
-    ax.set_xlabel('Field', fontsize=12)
-    ax.set_ylabel('Score', fontsize=12)
-    plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
-    
-    # Improve legend
-    ax.legend(title='Metric')
-    
-    # Adjust layout to prevent labels overlapping
-    fig.tight_layout()
+    # Customize titles and labels for each subplot
+    g.fig.suptitle('Metric Score Distributions by Field', fontsize=16, y=1.03)
+    g.set_axis_labels("Field", "Score")
+    g.set_titles("Metric: {col_name}")
+    g.set_xticklabels(rotation=45, ha='right')
+    g.tick_params(axis='x', labelsize=9)
+
+    # Helper function to set all colors of a boxplot
+    def set_boxplot_color(ax, color):
+        # Set the color for the main box patches
+        for box in ax.patches:
+            box.set_facecolor(color)
+        # # Set the color for whiskers, caps, and medians
+        # for line in ax.lines:
+        #     line.set_color(color)
+
+    # Apply custom colors and y-axis limits to each subplot
+    for ax in g.axes.flat:
+        metric_name = ax.get_title().replace('Metric: ', '')
+        color = palette.get(metric_name)
+        if color:
+            set_boxplot_color(ax, color)
+        
+        # The title of each subplot is 'Metric: {col_name}'
+        if ax.get_title() in ['Metric: BLEU', 'Metric: ROUGE-1', 'Metric: BertScore_F1']:
+            ax.set_ylim(-0.05, 1.05)
+
+    g.tight_layout(rect=[0, 0.03, 1, 0.97]) # Adjust layout to make space for labels and title
 
     # Save the plot
-    # output_dir = os.path.dirname(output_filepath)
-    # if output_dir:
-    #     os.makedirs(output_dir, exist_ok=True)
     if output_folder_path:
         os.makedirs(output_folder_path, exist_ok=True)
+        boxplot_path = os.path.join(output_folder_path, 'metrics_boxplot_faceted.png')
+        g.savefig(boxplot_path)
+        print(f"Faceted box plot saved to {boxplot_path}")
+    plt.close(g.fig)
+
+    # --- Create Faceted Violin Plot ---
+    g = sns.catplot(
+        data=metrics_df, 
+        x='field', 
+        y='score', 
+        col='metric', 
+        kind='violin', 
+        order=field_order, 
+        col_wrap=2, 
+        sharex=True, 
+        sharey=False, 
+        height=5, 
+        aspect=1.5)
+    g.fig.suptitle('Metric Score Distributions by Field', fontsize=16, y=1.03)
+    g.set_axis_labels("Field", "Score")
+    g.set_titles("Metric: {col_name}")
+    g.set_xticklabels(rotation=45, ha='right')
+    g.tick_params(axis='x', labelsize=9)
+
+    # Apply custom colors and y-axis limits to each subplot
+    for ax in g.axes.flat:
+        metric_name = ax.get_title().replace('Metric: ', '')
+        color = palette.get(metric_name)
+        if color:
+            for collection in ax.collections:
+                collection.set_facecolor(color)
         
-    # plt.savefig(output_filepath, bbox_inches='tight')
-    plt.savefig(os.path.join(output_folder_path, 'boxplot.png'), bbox_inches='tight')
-    print(f"Box plot saved to {output_folder_path}")
-    plt.close(fig) # Close the figure to free memory
+        if ax.get_title() in ['Metric: BLEU', 'Metric: ROUGE-1', 'Metric: BertScore_F1']:
+            ax.set_ylim(-0.05, 1.05)
 
-    # --- Create Violin Plot ---
-    fig, ax = plt.subplots(figsize=(20, 10))
-
-    sns.violinplot(
-        data=metrics_df,
-        x='field',
-        y='score',
-        hue='metric',
-        order=field_order,
-        hue_order=metric_order,
-        palette=colors,
-        ax=ax
-    )
-
-    # Set plot titles and labels
-    ax.set_title('Metric Score Distributions by Field', fontsize=16, pad=15)
-    ax.set_xlabel('Field', fontsize=12)
-    ax.set_ylabel('Score', fontsize=12)
-    plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
-
-    # Improve legend
-    ax.legend(title='Metric')
-
-    # Adjust layout to prevent labels overlapping
-    fig.tight_layout()
-
-    # # Save the plot to a derived filepath
-    plt.savefig(os.path.join(output_folder_path,'violinplot.png'), bbox_inches='tight')
-    print(f"Violin plot saved to {output_folder_path}")
-    plt.close(fig)  # Close the figure to free memory
+    g.tight_layout(rect=[0, 0.03, 1, 0.97]) # Adjust layout to make space for labels and title
+    
+    if output_folder_path:
+        violinplot_path = os.path.join(output_folder_path, 'metrics_violinplot_faceted.png')
+        g.savefig(violinplot_path)
+        print(f"Faceted violin plot saved to {violinplot_path}")
+    plt.close(g.fig)
 
 
 ### Helper function that given a path to text file and a list of source_spans, returns the text sections from the file where the information to annotated the field is located
