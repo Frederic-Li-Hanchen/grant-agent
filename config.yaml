@@ -11,7 +11,10 @@ run_steps:
   build_graph_database: false # Build the database of entities and relationships leveraging the chunk database to build a graph RAG
   split_graph_database: false # Split conjunction triplets (e.g. "Agency A und Agency B") into individual triplets before canonicalisation
   canonicalise_graph_database: false # Canonicalise entity surface forms in the graph database by clustering semantically similar values
-  filter_graph_database: true # Remove triplets with structurally invalid entity values (dates, URLs, purely numeric, overly long descriptions)
+  filter_graph_database: false # Remove triplets with structurally invalid entity values (dates, URLs, purely numeric, overly long descriptions)
+  build_knowledge_graph: false # Assemble filtered triplets into a NetworkX knowledge graph and serialise it to disk
+  detect_communities: false # Partition the knowledge graph into communities using the Louvain algorithm
+  summarise_communities: false # Generate a textual summary for each community (template for small, LLM for large)
   build_chromadb: false # Build a ChromaDB vector database from the structured database of text chunks
   check_database_quality: false # NOTE: not implemented yet
   create_ground_truth: false # NOTE: not implemented yet
@@ -94,12 +97,17 @@ canonicalise_graph_database:
   output_path: 'graph_rag/graph_database_canonicalised.jsonl' # Path where the canonicalised graph database should be saved
   mapping_output_path: 'graph_rag/canonicalisation_mapping.json' # Path where the canonicalisation mapping should be saved for inspection
   embedding_model_path: 'sentence-transformers/paraphrase-multilingual-mpnet-base-v2' # Sentence-transformer model used to embed entity surface forms
-  similarity_threshold: 0.75 # Cosine similarity above which two surface forms are merged (lower = more aggressive merging)
+  similarity_threshold: 0.65 # Cosine similarity above which two surface forms are merged (lower = more aggressive merging)
   token_overlap_threshold: 0.5 # Jaccard token similarity above which two forms are merged regardless of embedding distance
   department_separators: [' – ', ' - ', ' ('] # Substrings used to strip department/role suffixes (e.g. "DLR – Abt. X" -> "DLR", "Person A (contact)" -> "Person A")
   conjunction_markers: [' und ', ' and ', ' sowie '] # Substrings indicating a value lists multiple entities; such values are kept verbatim
   entity_types_normalise_only: ['PERSON'] # Entity types that get suffix stripping only (no clustering), to avoid false-positive merges between different people
   entity_types_to_canonicalise: ['FUNDING_BODY', 'APPLICANT', 'LOCATION'] # Entity types that get the full normalisation + clustering pipeline
+  manual_overrides: # Hard-coded mappings applied after automated clustering; takes precedence over all other canonicalisation
+    FUNDING_BODY:
+      "Bundesministerium für Bildung": "BMBF"
+      "Bundesministerium für Bildung und Forschung": "BMBF"
+      "Forschung": "BMBF"
 
 filter_graph_database:
   input_path: 'graph_rag/graph_database_canonicalised.jsonl' # Path to the canonicalised graph database (output of canonicalise_graph_database step)
@@ -107,6 +115,26 @@ filter_graph_database:
   rejected_output_path: 'graph_rag/graph_database_rejected.jsonl' # Path where rejected triplets should be saved for inspection
   entity_types_to_filter: ['APPLICANT', 'FUNDING_BODY', 'PERSON', 'LOCATION'] # Entity types to validate; structural types (DOCUMENT, SECTION) are always skipped
   max_words: 40 # Values with more than this many words are treated as descriptions rather than entity names
+
+build_knowledge_graph:
+  input_path: 'graph_rag/graph_database_filtered.jsonl' # Path to the filtered graph database (output of filter_graph_database step)
+  output_path: 'graph_rag/knowledge_graph.pkl' # Path where the serialised NetworkX graph should be saved
+  directed: true # Whether to build a directed graph (True) or undirected (False)
+
+detect_communities:
+  input_path: 'graph_rag/knowledge_graph.pkl' # Path to the pickled knowledge graph (updated in-place with community_id attributes)
+  communities_output_path: 'graph_rag/communities.json' # Path where per-community node+edge data is saved for summarisation
+  resolution: 1.0 # Louvain resolution parameter: higher value -> more, smaller communities
+  seed: 42 # Random seed for reproducibility
+
+summarise_communities:
+  communities_path: 'graph_rag/communities.json' # Path to the communities JSON (output of detect_communities)
+  output_path: 'graph_rag/community_summaries.json' # Path where the community summaries should be saved
+  llm_name: 'gemini-2.5-flash' # Gemini model to use for summarisation
+  temperature: 0 # LLM temperature
+  min_size_for_llm: 5 # Communities smaller than this use a template summary (no LLM call)
+  max_nodes_per_summary: 50 # Maximum nodes sent to the LLM per community (top by frequency)
+  max_edges_per_summary: 100 # Maximum edges sent to the LLM per community (top by weight)
 
 build_chromadb:
   database_path: 'graph_rag/structured_database_with_topics.jsonl' # Path to the jsonl file containing the structured database of chunks

@@ -63,7 +63,7 @@ def format_config(config: Dict[str, Any]) -> Dict[str, Any]:
 def load_config_from_yaml(config_path: str) -> Dict[str, Any]:
     """Loads the YAML configuration file."""
     print(f"Loading configuration from {config_path}...")
-    with open(config_path, 'r') as f:
+    with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
     # Get the variables and format the rest of the configuration
     formatted_config = format_config(config)

@@ -3,6 +3,8 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import regex as re
 import os
+import pickle
+import networkx as nx
 from time import sleep, time
 import random  # For random sleep intervals
 from utils import load_config_from_yaml
@@ -1355,7 +1357,7 @@ def split_conjunction_triplets(
             f_out.write(json.dumps(triplet, ensure_ascii=False) + '\n')
 
     end_time = time()
-    print(f'Split {n_original_split} conjunction triplet(s): {len(triplets)} → {len(output_triplets)} total triplets.')
+    print(f'Split {n_original_split} conjunction triplet(s): {len(triplets)} -> {len(output_triplets)} total triplets.')
     print(f'Split graph database saved to {output_path} in {end_time - start_time:.2f} seconds.\n')
 
 
@@ -1402,7 +1404,8 @@ def canonicalise_graph_database(
         department_separators: List[str] = None,
         conjunction_markers: List[str] = None,
         entity_types_normalise_only: List[str] = None,
-        entity_types_to_canonicalise: List[str] = None
+        entity_types_to_canonicalise: List[str] = None,
+        manual_overrides: Dict[str, Dict[str, str]] = None
 ) -> None:
 
     import numpy as np
@@ -1529,7 +1532,7 @@ def canonicalise_graph_database(
             print(f'  - {entity_type}: all {len(cluster_vals)} values normalise to a single entity.')
             continue
 
-        print(f'  - {entity_type}: {len(cluster_vals)} values → {len(unique_norms)} normalised forms — embedding and clustering ...')
+        print(f'  - {entity_type}: {len(cluster_vals)} values -> {len(unique_norms)} normalised forms - embedding and clustering ...')
 
         # Step 3 — Combined-distance clustering on normalised forms
         # Embed normalised values (L2-normalised → dot product = cosine similarity)
@@ -1582,14 +1585,41 @@ def canonicalise_graph_database(
         json.dump(mapping_serialisable, f, ensure_ascii=False, indent=2)
     print(f'Mapping saved to {mapping_output_path}.')
 
+    # --- Build a flat override lookup keyed by (entity_type, canonical_value) ---
+    # Manual overrides are applied as a SECOND pass on the canonical output rather than on the
+    # original surface form. This is necessary because some override targets (e.g.
+    # "Bundesministerium für Bildung") are normalised forms produced by the automated step, not
+    # original surface forms present in the triplets, so they would never match a first-pass lookup.
+    canonical_overrides: Dict[tuple, str] = {}
+    if manual_overrides:
+        for entity_type, type_overrides in manual_overrides.items():
+            for canonical_val, final_val in type_overrides.items():
+                canonical_overrides[(entity_type, canonical_val)] = final_val
+        print(f'Loaded {len(canonical_overrides)} manual override(s) (applied to canonical values).')
+
     # --- Apply mapping and write canonicalised output ---
+    n_overrides_applied = 0
     with open(output_path, 'w', encoding='utf-8') as f_out:
         for triplet in triplets:
             subj_key = (triplet['subject_type'], triplet['subject_value'])
-            obj_key = (triplet['object_type'], triplet['object_value'])
-            triplet['subject_value'] = canonical_map.get(subj_key, triplet['subject_value'])
-            triplet['object_value'] = canonical_map.get(obj_key, triplet['object_value'])
+            obj_key  = (triplet['object_type'],  triplet['object_value'])
+            subj_val = canonical_map.get(subj_key, triplet['subject_value'])
+            obj_val  = canonical_map.get(obj_key,  triplet['object_value'])
+            # Second pass: apply manual overrides on the canonical values
+            if canonical_overrides:
+                overridden_subj = canonical_overrides.get((triplet['subject_type'], subj_val))
+                overridden_obj  = canonical_overrides.get((triplet['object_type'],  obj_val))
+                if overridden_subj:
+                    subj_val = overridden_subj
+                    n_overrides_applied += 1
+                if overridden_obj:
+                    obj_val = overridden_obj
+                    n_overrides_applied += 1
+            triplet['subject_value'] = subj_val
+            triplet['object_value']  = obj_val
             f_out.write(json.dumps(triplet, ensure_ascii=False) + '\n')
+    if canonical_overrides:
+        print(f'Manual overrides applied to {n_overrides_applied} triplet field(s).')
 
     end_time = time()
     print(f'Canonicalised graph database saved to {output_path} in {end_time - start_time:.2f} seconds.\n')
@@ -1694,6 +1724,334 @@ def filter_graph_database(
             print(f'    {t}: {count}')
     print(f'Rejected triplets saved to {rejected_output_path} for inspection.')
     print(f'Filtered graph database saved to {output_path} in {end_time - start_time:.2f} seconds.\n')
+
+
+# ============================================
+# === Knowledge Graph Construction ===
+# ============================================
+
+### Function that assembles the canonicalised and filtered triplets into a NetworkX knowledge graph.
+### Each unique (entity_type, entity_value) pair becomes a node; each (subject, predicate, object)
+### combination becomes a directed edge. Where multiple triplets share the same subject-object pair,
+### their predicates and chunk_ids are aggregated and the edge weight reflects the number of
+### supporting triplets.
+# Input:
+# - [str] input_path: path to the jsonl file containing the filtered graph database of triplets
+# - [str] output_path: path where the serialised NetworkX graph should be saved (pickle format)
+# - [bool] directed: whether to build a directed (True) or undirected (False) graph
+# Output:
+# - None
+def build_knowledge_graph(
+        input_path: str,
+        output_path: str,
+        directed: bool = True
+) -> None:
+
+    start_time = time()
+    print('\nBuilding knowledge graph from triplets ...')
+
+    with open(input_path, 'r', encoding='utf-8') as f:
+        triplets = [json.loads(line) for line in f]
+    print(f'Loaded {len(triplets)} triplets from {input_path}.')
+
+    G = nx.DiGraph() if directed else nx.Graph()
+
+    # node_id format: "<entity_type>::<entity_value>" — unique across all types
+    node_counts: Dict[str, int] = {}
+    # Aggregate edge attributes keyed by (subject_node_id, object_node_id)
+    edge_data: Dict[tuple, Dict] = {}
+
+    for triplet in triplets:
+        subj_id = f"{triplet['subject_type']}::{triplet['subject_value']}"
+        obj_id  = f"{triplet['object_type']}::{triplet['object_value']}"
+
+        node_counts[subj_id] = node_counts.get(subj_id, 0) + 1
+        node_counts[obj_id]  = node_counts.get(obj_id,  0) + 1
+
+        edge_key = (subj_id, obj_id)
+        if edge_key not in edge_data:
+            edge_data[edge_key] = {'predicates': set(), 'chunk_ids': []}
+        edge_data[edge_key]['predicates'].add(triplet['predicate'])
+        edge_data[edge_key]['chunk_ids'].append(triplet['chunk_id'])
+
+    # Populate graph nodes
+    for node_id, count in node_counts.items():
+        entity_type, entity_value = node_id.split('::', 1)
+        G.add_node(node_id, entity_type=entity_type, entity_value=entity_value, count=count)
+
+    # Populate graph edges (weight = number of supporting triplets)
+    for (subj_id, obj_id), data in edge_data.items():
+        G.add_edge(
+            subj_id, obj_id,
+            predicates=list(data['predicates']),
+            chunk_ids=data['chunk_ids'],
+            weight=len(data['chunk_ids'])
+        )
+
+    # Serialise
+    with open(output_path, 'wb') as f_out:
+        pickle.dump(G, f_out)
+
+    # Summary statistics
+    degrees = [d for _, d in G.degree()]
+    type_counts = {}
+    for n in G.nodes():
+        t = G.nodes[n]['entity_type']
+        type_counts[t] = type_counts.get(t, 0) + 1
+
+    end_time = time()
+    print(f'Knowledge graph built: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges.')
+    print(f'  Node types: { {k: v for k, v in sorted(type_counts.items(), key=lambda x: -x[1])} }')
+    print(f'  Average degree: {sum(degrees) / len(degrees):.1f}, max degree: {max(degrees)}')
+    print(f'Knowledge graph saved to {output_path} in {end_time - start_time:.2f} seconds.\n')
+
+
+# ============================================
+# === Community Detection ===
+# ============================================
+
+### Function that partitions the knowledge graph into communities using the Louvain algorithm.
+### The directed graph is first projected to undirected (parallel directed edges are merged by
+### summing their weights) before running community detection, since Louvain operates on
+### undirected graphs.
+### Each community is represented as a list of its nodes (with entity_type, entity_value, count)
+### and its internal edges (predicates + weight). This output is designed to feed directly into
+### the community summarisation step (Step 6).
+### The knowledge graph pickle is updated in-place with a 'community_id' attribute on every node.
+# Input:
+# - [str] input_path: path to the pickled NetworkX knowledge graph
+# - [str] communities_output_path: path where the per-community JSON should be saved
+# - [float] resolution: Louvain resolution parameter (higher -> more, smaller communities)
+# - [int] seed: random seed for reproducibility
+# Output:
+# - None
+def detect_communities(
+        input_path: str,
+        communities_output_path: str,
+        resolution: float = 1.0,
+        seed: int = 42
+) -> None:
+
+    from networkx.algorithms.community import louvain_communities
+
+    start_time = time()
+    print('\nDetecting communities in the knowledge graph ...')
+
+    with open(input_path, 'rb') as f:
+        G = pickle.load(f)
+    print(f'Loaded graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges.')
+
+    # --- Project DiGraph to undirected, merging parallel edges by summing weights ---
+    G_undirected = nx.Graph()
+    for node, attrs in G.nodes(data=True):
+        G_undirected.add_node(node, **attrs)
+    for u, v, data in G.edges(data=True):
+        if G_undirected.has_edge(u, v):
+            G_undirected[u][v]['weight'] += data.get('weight', 1)
+        else:
+            G_undirected.add_edge(u, v, weight=data.get('weight', 1))
+
+    print(f'Undirected projection: {G_undirected.number_of_nodes()} nodes, {G_undirected.number_of_edges()} edges.')
+
+    # --- Run Louvain community detection ---
+    communities = louvain_communities(G_undirected, weight='weight', resolution=resolution, seed=seed)
+    print(f'Detected {len(communities)} communities.')
+
+    # --- Assign community IDs to nodes in the original directed graph ---
+    node_to_community: Dict[str, int] = {}
+    for community_id, node_set in enumerate(communities):
+        for node in node_set:
+            node_to_community[node] = community_id
+    nx.set_node_attributes(G, node_to_community, name='community_id')
+
+    # --- Build per-community output for the summarisation step ---
+    community_data = {}
+    for community_id, node_set in enumerate(communities):
+        node_list = []
+        for node in node_set:
+            attrs = G.nodes[node]
+            node_list.append({
+                'entity_type': attrs['entity_type'],
+                'entity_value': attrs['entity_value'],
+                'count': attrs['count']
+            })
+        # Collect internal edges (both endpoints in this community)
+        edge_list = []
+        node_set_ids = set(node_set)
+        seen_pairs = set()
+        for u in node_set:
+            for v in G.successors(u):
+                if v in node_set_ids:
+                    pair = (min(u, v), max(u, v))
+                    if pair not in seen_pairs:
+                        seen_pairs.add(pair)
+                        edata = G.edges[u, v]
+                        edge_list.append({
+                            'source_type': G.nodes[u]['entity_type'],
+                            'source_value': G.nodes[u]['entity_value'],
+                            'target_type': G.nodes[v]['entity_type'],
+                            'target_value': G.nodes[v]['entity_value'],
+                            'predicates': edata.get('predicates', []),
+                            'weight': edata.get('weight', 1)
+                        })
+        community_data[community_id] = {
+            'size': len(node_set),
+            'nodes': node_list,
+            'edges': edge_list
+        }
+
+    # --- Save updated graph (with community_id attributes) ---
+    with open(input_path, 'wb') as f:
+        pickle.dump(G, f)
+
+    # --- Save community data for inspection and summarisation ---
+    with open(communities_output_path, 'w', encoding='utf-8') as f:
+        json.dump(community_data, f, ensure_ascii=False, indent=2)
+
+    # --- Print size distribution statistics ---
+    sizes = sorted([len(c) for c in communities], reverse=True)
+    end_time = time()
+    print(f'Community size stats: max={sizes[0]}, median={sizes[len(sizes)//2]}, min={sizes[-1]}, '
+          f'singleton communities={sum(1 for s in sizes if s == 1)}')
+    print(f'Communities saved to {communities_output_path} in {end_time - start_time:.2f} seconds.\n')
+
+
+# ============================================
+# === Community Summarisation ===
+# ============================================
+
+### Function that generates a textual summary for each community in the knowledge graph.
+### Communities are processed in two tiers:
+###   - Small communities (size < min_size_for_llm, default 5): described via a simple template,
+###     listing the entities and relationship types — no LLM call needed.
+###   - Larger communities (size >= min_size_for_llm): summarised by an LLM in 2-4 sentences,
+###     capturing the thematic focus and key entities. Input is truncated to the top
+###     max_nodes_per_summary nodes (by count) and max_edges_per_summary edges (by weight) to
+###     avoid overlong prompts for very large communities.
+### Summaries are saved incrementally to support resuming an interrupted run.
+# Input:
+# - [str] communities_path: path to the communities JSON (output of detect_communities)
+# - [str] output_path: path where the community summaries JSON should be saved
+# - [str] llm_name: name of the Gemini model to use for summarisation
+# - [float] temperature: LLM temperature (0 for deterministic output)
+# - [int] min_size_for_llm: minimum community size to trigger an LLM call (smaller = template)
+# - [int] max_nodes_per_summary: maximum number of nodes to include in an LLM prompt
+# - [int] max_edges_per_summary: maximum number of edges to include in an LLM prompt
+# Output:
+# - None
+def summarise_communities(
+        communities_path: str,
+        output_path: str,
+        llm_name: str = 'gemini-2.5-flash',
+        temperature: float = 0,
+        min_size_for_llm: int = 5,
+        max_nodes_per_summary: int = 50,
+        max_edges_per_summary: int = 100
+) -> None:
+
+    start_time = time()
+    print('\nSummarising communities ...')
+
+    with open(communities_path, 'r', encoding='utf-8') as f:
+        communities = json.load(f)
+    print(f'Loaded {len(communities)} communities from {communities_path}.')
+
+    # --- Resume logic: load existing summaries if present ---
+    summaries: Dict[str, str] = {}
+    if os.path.exists(output_path):
+        with open(output_path, 'r', encoding='utf-8') as f:
+            summaries = json.load(f)
+        print(f'Resuming: {len(summaries)} summaries already done, skipping those.')
+
+    # --- Initialise LLM ---
+    load_dotenv()
+    graph_rag_api_key = os.getenv("GRAPH_RAG_GEMINI_API_KEY")
+    if graph_rag_api_key is None:
+        raise ValueError("GRAPH_RAG_GEMINI_API_KEY not found among the environment variables defined in .env")
+    llm = ChatGoogleGenerativeAI(model=llm_name, temperature=temperature, google_api_key=graph_rag_api_key)
+
+    # --- System prompt (shared across all LLM calls) ---
+    system_prompt = (
+        "You are analysing a knowledge graph extracted from German research grant calls "
+        "(Bekanntmachungen) issued by the German Federal Ministry of Education and Research (BMBF). "
+        "Your task is to write a concise summary (2-4 sentences) of a community of related entities "
+        "and relationships from the graph. The summary should identify the thematic focus, mention "
+        "the most important entities and their roles, and be written in English."
+    )
+
+    # --- Helper: template summary for small communities (no LLM) ---
+    def template_summary(community: Dict) -> str:
+        nodes = community['nodes']
+        edges = community['edges']
+        node_strs = [f'{n["entity_type"]} "{n["entity_value"]}"' for n in nodes]
+        if edges:
+            predicates = list({p for e in edges for p in e['predicates']})
+            return (f'Small community of {len(nodes)} entities: {", ".join(node_strs)}. '
+                    f'Key relationship type(s): {", ".join(predicates)}.')
+        return f'Small community of {len(nodes)} entities: {", ".join(node_strs)}.'
+
+    # --- Helper: format a community as LLM prompt content ---
+    def format_for_llm(community: Dict) -> str:
+        nodes = sorted(community['nodes'], key=lambda n: -n['count'])[:max_nodes_per_summary]
+        edges = sorted(community['edges'], key=lambda e: -e['weight'])[:max_edges_per_summary]
+        n_total, n_shown = community['size'], len(nodes)
+
+        entities_str = '\n'.join(
+            f'  - [{n["entity_type"]}] "{n["entity_value"]}" (frequency: {n["count"]})'
+            for n in nodes
+        )
+        edges_str = '\n'.join(
+            f'  - "{e["source_value"]}" --[{", ".join(e["predicates"])}]--> "{e["target_value"]}" (weight: {e["weight"]})'
+            for e in edges
+        ) if edges else '  (no internal relationships recorded)'
+
+        return (
+            f'Community of {n_total} entities (showing top {n_shown} by frequency):\n\n'
+            f'ENTITIES:\n{entities_str}\n\n'
+            f'RELATIONSHIPS (top {len(edges)} by weight):\n{edges_str}\n\n'
+            f'Write a 2-4 sentence summary of this community:'
+        )
+
+    # --- Process each community ---
+    n_template = n_llm = n_skipped = 0
+    for community_id in sorted(communities.keys(), key=lambda x: int(x)):
+        community = communities[community_id]
+        size = community['size']
+
+        if community_id in summaries:
+            n_skipped += 1
+            continue
+
+        if size < min_size_for_llm:
+            summaries[community_id] = template_summary(community)
+            n_template += 1
+        else:
+            for attempt in range(3):
+                try:
+                    response = llm.invoke([('system', system_prompt), ('human', format_for_llm(community))])
+                    summaries[community_id] = response.content.strip()
+                    break
+                except ResourceExhausted:
+                    if attempt < 2:
+                        print(f'  Rate limit hit on community {community_id}, retrying in 30s ...')
+                        sleep(30)
+                    else:
+                        print(f'  Warning: could not summarise community {community_id} after 3 attempts, using template.')
+                        summaries[community_id] = template_summary(community)
+            n_llm += 1
+
+        # Save incrementally every 50 new summaries to support resuming
+        if (n_template + n_llm) % 50 == 0:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(summaries, f, ensure_ascii=False, indent=2)
+
+    # Final save
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(summaries, f, ensure_ascii=False, indent=2)
+
+    end_time = time()
+    print(f'Done: {n_template} template summaries, {n_llm} LLM summaries ({n_skipped} already done).')
+    print(f'Community summaries saved to {output_path} in {end_time - start_time:.2f} seconds.\n')
 
 
 ### Helper function that converts the list of topics into a one-hot vector representation so that it can be added to the ChromaDB metadata
@@ -1935,7 +2293,8 @@ if __name__ == "__main__":
             department_separators=parameters.get('department_separators', None),
             conjunction_markers=parameters.get('conjunction_markers', None),
             entity_types_normalise_only=parameters.get('entity_types_normalise_only', None),
-            entity_types_to_canonicalise=parameters.get('entity_types_to_canonicalise', None)
+            entity_types_to_canonicalise=parameters.get('entity_types_to_canonicalise', None),
+            manual_overrides=parameters.get('manual_overrides', None)
         )
 
     ### Filter invalid entity values from the graph database
@@ -1948,6 +2307,41 @@ if __name__ == "__main__":
             rejected_output_path=parameters.get('rejected_output_path'),
             entity_types_to_filter=parameters.get('entity_types_to_filter', None),
             max_words=parameters.get('max_words', 20)
+        )
+
+    ### Assemble the knowledge graph from the filtered triplets
+    if run_steps.get('build_knowledge_graph', False):
+        print("\n--- Building the knowledge graph ---")
+        parameters = config.get('build_knowledge_graph', {})
+        build_knowledge_graph(
+            input_path=parameters.get('input_path'),
+            output_path=parameters.get('output_path'),
+            directed=parameters.get('directed', True)
+        )
+
+    ### Detect communities in the knowledge graph
+    if run_steps.get('detect_communities', False):
+        print("\n--- Detecting communities in the knowledge graph ---")
+        parameters = config.get('detect_communities', {})
+        detect_communities(
+            input_path=parameters.get('input_path'),
+            communities_output_path=parameters.get('communities_output_path'),
+            resolution=parameters.get('resolution', 1.0),
+            seed=parameters.get('seed', 42)
+        )
+
+    ### Summarise communities in the knowledge graph
+    if run_steps.get('summarise_communities', False):
+        print("\n--- Summarising communities ---")
+        parameters = config.get('summarise_communities', {})
+        summarise_communities(
+            communities_path=parameters.get('communities_path'),
+            output_path=parameters.get('output_path'),
+            llm_name=parameters.get('llm_name', 'gemini-2.5-flash'),
+            temperature=parameters.get('temperature', 0),
+            min_size_for_llm=parameters.get('min_size_for_llm', 5),
+            max_nodes_per_summary=parameters.get('max_nodes_per_summary', 50),
+            max_edges_per_summary=parameters.get('max_edges_per_summary', 100)
         )
 
     ### Build the ChromaDB structured database for the graph RAG
