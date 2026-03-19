@@ -1269,6 +1269,433 @@ def extract_entities_and_relationships(
     print(f"Entities and relationships extracted and saved in {output_path} in {end_time - start_time:.2f} seconds.\n")
 
 
+# =============================================
+# === Pre-processing of the Graph Database ===
+# =============================================
+
+### Function that expands conjunction triplets into individual triplets.
+### Values of the targeted entity types that list multiple entities joined by a conjunction marker
+### (e.g. "Agency A und Agency B") are split into their constituents, and one triplet is produced
+### per constituent combination so that each node in the graph represents a single entity.
+### Only values where every part produced by the split contains at least min_part_words words are
+### split, to avoid incorrectly splitting institution names that legitimately contain "und"
+### (e.g. "Bundesministerium für Bildung und Forschung", where "Forschung" is a single word).
+# Input:
+# - [str] input_path: path to the jsonl file containing the raw graph database of triplets
+# - [str] output_path: path to the jsonl file where the expanded graph database should be saved
+# - [List[str]] entity_types_to_split: entity types for which conjunction values should be split
+# - [List[str]] conjunction_markers: substrings used to detect and split conjunction values
+# - [int] min_part_words: minimum number of words each split part must have for the split to apply
+# Output:
+# - None
+def split_conjunction_triplets(
+        input_path: str,
+        output_path: str,
+        entity_types_to_split: List[str] = None,
+        conjunction_markers: List[str] = None,
+        min_part_words: int = 2
+) -> None:
+
+    if entity_types_to_split is None:
+        entity_types_to_split = ['FUNDING_BODY', 'APPLICANT', 'PERSON', 'LOCATION']
+    if conjunction_markers is None:
+        conjunction_markers = [' und ', ' and ', ' sowie ']
+
+    start_time = time()
+    print('\nSplitting conjunction triplets in the graph database ...')
+
+    with open(input_path, 'r', encoding='utf-8') as f:
+        triplets = [json.loads(line) for line in f]
+    print(f'Loaded {len(triplets)} triplets from {input_path}.')
+
+    # Split a value on all conjunction markers and return the list of constituent parts.
+    # Returns the original value as a single-element list if the split does not apply.
+    def split_value(value: str) -> List[str]:
+        result = value
+        for marker in conjunction_markers:
+            result = result.replace(marker, '\x00')  # null byte as internal separator
+        parts = [p.strip() for p in result.split('\x00') if p.strip()]
+        return parts if len(parts) >= 2 else [value]
+
+    # A value is a splittable conjunction if every constituent part has at least min_part_words words
+    # and no part ends with a hyphen. A trailing hyphen indicates a German compound abbreviation
+    # (e.g. "Luft- und Raumfahrt" = "Luftfahrt und Raumfahrt"), not a conjunction of two entities.
+    def is_splittable(entity_type: str, value: str) -> bool:
+        if entity_type not in entity_types_to_split:
+            return False
+        parts = split_value(value)
+        return (len(parts) >= 2
+                and not any(p.endswith('-') for p in parts)
+                and all(len(p.split()) >= min_part_words for p in parts))
+
+    output_triplets = []
+    n_original_split = 0
+
+    for triplet in triplets:
+        split_subj = is_splittable(triplet['subject_type'], triplet['subject_value'])
+        split_obj = is_splittable(triplet['object_type'], triplet['object_value'])
+
+        if not split_subj and not split_obj:
+            output_triplets.append(triplet)
+            continue
+
+        n_original_split += 1
+        subj_parts = split_value(triplet['subject_value']) if split_subj else [triplet['subject_value']]
+        obj_parts = split_value(triplet['object_value']) if split_obj else [triplet['object_value']]
+
+        for s in subj_parts:
+            for o in obj_parts:
+                new_triplet = dict(triplet)
+                new_triplet['subject_value'] = s
+                new_triplet['object_value'] = o
+                output_triplets.append(new_triplet)
+
+    with open(output_path, 'w', encoding='utf-8') as f_out:
+        for triplet in output_triplets:
+            f_out.write(json.dumps(triplet, ensure_ascii=False) + '\n')
+
+    end_time = time()
+    print(f'Split {n_original_split} conjunction triplet(s): {len(triplets)} → {len(output_triplets)} total triplets.')
+    print(f'Split graph database saved to {output_path} in {end_time - start_time:.2f} seconds.\n')
+
+
+# =============================================
+# === Canonicalisation of the Graph Database ===
+# =============================================
+
+### Function that canonicalises entity values in the graph database by clustering semantically similar
+### surface forms within each entity type and replacing them with a single canonical representative.
+### Only entity types listed in entity_types_to_canonicalise or entity_types_normalise_only are
+### processed; structural types such as DOCUMENT and SECTION are left unchanged.
+### Two processing strategies are applied depending on the entity type:
+###   - Normalise-only (entity_types_normalise_only, default: PERSON): strips suffixes via
+###     department_separators (e.g. "Person A (technical contact)" -> "Person A") but performs no
+###     clustering. This prevents false-positive merges between different people, where embedding
+###     and token-overlap similarity are unreliable for short proper nouns.
+###   - Full pipeline (entity_types_to_canonicalise, default: FUNDING_BODY, APPLICANT, LOCATION):
+###     1. Conjunction filtering: values listing multiple entities are kept verbatim.
+###     2. Department normalisation: suffixes are stripped before embedding.
+###     3. Combined-distance clustering: merges when cosine similarity >= similarity_threshold OR
+###        Jaccard token similarity >= token_overlap_threshold.
+### The canonical name for each cluster is the most frequent normalised surface form.
+### A mapping file is saved alongside the output for inspection.
+# Input:
+# - [str] input_path: path to the jsonl file containing the raw graph database of triplets
+# - [str] output_path: path to the jsonl file where the canonicalised graph database should be saved
+# - [str] mapping_output_path: path to the json file where the canonicalisation mapping should be saved
+# - [str] embedding_model_path: sentence-transformer model used to embed entity surface forms
+# - [float] similarity_threshold: cosine similarity above which two surface forms are merged (e.g. 0.75)
+# - [float] token_overlap_threshold: Jaccard token similarity above which two forms are merged (e.g. 0.5)
+# - [List[str]] department_separators: substrings that separate a name from a department or role suffix
+# - [List[str]] conjunction_markers: substrings indicating a value lists multiple entities
+# - [List[str]] entity_types_normalise_only: entity types that get suffix stripping but no clustering
+# - [List[str]] entity_types_to_canonicalise: entity types that get the full clustering pipeline
+# Output:
+# - None
+def canonicalise_graph_database(
+        input_path: str,
+        output_path: str,
+        mapping_output_path: str,
+        embedding_model_path: str = 'sentence-transformers/paraphrase-multilingual-mpnet-base-v2',
+        similarity_threshold: float = 0.75,
+        token_overlap_threshold: float = 0.5,
+        department_separators: List[str] = None,
+        conjunction_markers: List[str] = None,
+        entity_types_normalise_only: List[str] = None,
+        entity_types_to_canonicalise: List[str] = None
+) -> None:
+
+    import numpy as np
+    from scipy.spatial.distance import squareform
+    from scipy.cluster.hierarchy import linkage, fcluster
+
+    if entity_types_normalise_only is None:
+        entity_types_normalise_only = ['PERSON']
+    if entity_types_to_canonicalise is None:
+        entity_types_to_canonicalise = ['FUNDING_BODY', 'APPLICANT', 'LOCATION']
+    if department_separators is None:
+        department_separators = [' – ', ' - ', ' (']
+    if conjunction_markers is None:
+        conjunction_markers = [' und ', ' and ', ' sowie ']
+
+    start_time = time()
+    print('\nCanonicalising entity values in the graph database ...')
+
+    # --- Load all triplets ---
+    with open(input_path, 'r', encoding='utf-8') as f:
+        triplets = [json.loads(line) for line in f]
+    print(f'Loaded {len(triplets)} triplets from {input_path}.')
+
+    # --- Count occurrences of each (type, value) pair across subjects and objects ---
+    # Used to elect the most frequent normalised form as the canonical name per cluster.
+    value_counts: Dict[tuple, int] = {}
+    for triplet in triplets:
+        for side_type, side_value in [
+            (triplet['subject_type'], triplet['subject_value']),
+            (triplet['object_type'], triplet['object_value'])
+        ]:
+            key = (side_type, side_value)
+            value_counts[key] = value_counts.get(key, 0) + 1
+
+    # --- Helper: strip department-level suffix ---
+    # Keeps only the part of the value before the first department separator.
+    # E.g. "DLR – Projektträger Energie" -> "DLR"
+    def normalise_value(value: str) -> str:
+        for sep in department_separators:
+            idx = value.find(sep)
+            if idx > 0:
+                return value[:idx].strip()
+        return value
+
+    # --- Helper: detect conjunction values ---
+    # A value is treated as a conjunction if splitting on a marker yields >=2 parts each
+    # containing at least 2 words. The 2-word minimum prevents false positives on legitimate
+    # institution names that contain "und" (e.g. "Bundesministerium für Bildung und Forschung",
+    # where "Forschung" is a single word after the split).
+    def is_conjunction(value: str) -> bool:
+        for marker in conjunction_markers:
+            parts = value.split(marker)
+            if len(parts) >= 2 and all(len(p.strip().split()) >= 2 for p in parts):
+                return True
+        return False
+
+    # --- Helper: token-level Jaccard similarity ---
+    def jaccard_similarity(a: str, b: str) -> float:
+        tokens_a = set(a.lower().split())
+        tokens_b = set(b.lower().split())
+        if not tokens_a and not tokens_b:
+            return 1.0
+        return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+
+    # --- Load the embedding model ---
+    print(f'Loading embedding model from {embedding_model_path} ...')
+    model = SentenceTransformer(embedding_model_path)
+
+    # --- Build the canonical mapping ---
+    # canonical_map[(entity_type, original_surface_form)] -> canonical_value
+    canonical_map: Dict[tuple, str] = {}
+
+    # --- Normalise-only pass (no clustering) ---
+    # For short proper-noun types like PERSON, embedding and token-overlap similarity are unreliable
+    # (e.g. "Dr. A Müller" and "Dr. B Müller" score high on both metrics despite being different
+    # people). Only suffix stripping is applied: "Person A (technical contact)" -> "Person A".
+    for entity_type in entity_types_normalise_only:
+        originals = [v for (t, v) in value_counts if t == entity_type]
+        if not originals:
+            print(f'  - {entity_type}: no values found, skipping.')
+            continue
+        n_changed = 0
+        for v in originals:
+            canonical = normalise_value(v)
+            canonical_map[(entity_type, v)] = canonical
+            if canonical != v:
+                n_changed += 1
+        print(f'  - {entity_type}: {len(originals)} values normalised, {n_changed} suffix(es) stripped (no clustering).')
+
+    # --- Full clustering pass ---
+    for entity_type in entity_types_to_canonicalise:
+        originals = [v for (t, v) in value_counts if t == entity_type]
+
+        if not originals:
+            print(f'  - {entity_type}: no values found, skipping.')
+            continue
+
+        # Step 1 — Conjunction filtering: keep conjunction values verbatim
+        conjunction_vals = [v for v in originals if is_conjunction(v)]
+        cluster_vals = [v for v in originals if not is_conjunction(v)]
+        for v in conjunction_vals:
+            canonical_map[(entity_type, v)] = v
+        if conjunction_vals:
+            print(f'  - {entity_type}: {len(conjunction_vals)} conjunction value(s) kept as-is.')
+
+        if not cluster_vals:
+            continue
+
+        # Step 2 — Department normalisation: map each original to its institution-level form
+        # Multiple originals may collapse to the same normalised form here (free merge).
+        normalised = {v: normalise_value(v) for v in cluster_vals}
+
+        # Aggregate occurrence counts at the normalised-form level
+        norm_counts: Dict[str, int] = {}
+        for v in cluster_vals:
+            n = normalised[v]
+            norm_counts[n] = norm_counts.get(n, 0) + value_counts.get((entity_type, v), 0)
+        unique_norms = list(norm_counts.keys())
+
+        if len(unique_norms) == 1:
+            canonical = unique_norms[0]
+            for v in cluster_vals:
+                canonical_map[(entity_type, v)] = canonical
+            print(f'  - {entity_type}: all {len(cluster_vals)} values normalise to a single entity.')
+            continue
+
+        print(f'  - {entity_type}: {len(cluster_vals)} values → {len(unique_norms)} normalised forms — embedding and clustering ...')
+
+        # Step 3 — Combined-distance clustering on normalised forms
+        # Embed normalised values (L2-normalised → dot product = cosine similarity)
+        embeddings = model.encode(unique_norms, show_progress_bar=False, normalize_embeddings=True)
+        cosine_sim = np.dot(embeddings, embeddings.T)
+        cosine_dist = np.clip(1.0 - cosine_sim, 0, 2)
+        np.fill_diagonal(cosine_dist, 0.0)
+
+        # Normalise each distance by its respective merge threshold so that the clustering
+        # cut-point is always 1.0. combined_dist[i,j] <= 1.0 iff cosine OR Jaccard criterion met.
+        emb_dist_thresh = 1.0 - similarity_threshold
+        tok_dist_thresh = 1.0 - token_overlap_threshold
+        cosine_dist_norm = cosine_dist / emb_dist_thresh
+
+        n_vals = len(unique_norms)
+        jaccard_dist_norm = np.ones((n_vals, n_vals), dtype=float)
+        for i in range(n_vals):
+            for j in range(i + 1, n_vals):
+                j_sim = jaccard_similarity(unique_norms[i], unique_norms[j])
+                jaccard_dist_norm[i, j] = jaccard_dist_norm[j, i] = (1.0 - j_sim) / tok_dist_thresh
+        np.fill_diagonal(jaccard_dist_norm, 0.0)
+
+        combined_dist = np.minimum(cosine_dist_norm, jaccard_dist_norm)
+        np.fill_diagonal(combined_dist, 0.0)
+        condensed = squareform(combined_dist, checks=False)
+
+        Z = linkage(condensed, method='average')
+        labels = fcluster(Z, t=1.0, criterion='distance')
+
+        # For each cluster, elect the normalised form with the highest aggregated count
+        clusters: Dict[int, List[str]] = {}
+        for norm_val, label in zip(unique_norms, labels):
+            clusters.setdefault(int(label), []).append(norm_val)
+
+        print(f'    -> {len(unique_norms)} normalised forms merged into {len(clusters)} canonical entities.')
+
+        for cluster_norms in clusters.values():
+            canonical = max(cluster_norms, key=lambda nv: norm_counts.get(nv, 0))
+            for norm_val in cluster_norms:
+                for v in cluster_vals:
+                    if normalised[v] == norm_val:
+                        canonical_map[(entity_type, v)] = canonical
+
+    n_types = len(entity_types_normalise_only) + len(entity_types_to_canonicalise)
+    print(f'Canonical mapping built: {len(canonical_map)} entries across {n_types} entity types.')
+
+    # --- Save the mapping for inspection ---
+    mapping_serialisable = {f"{t}||{v}": c for (t, v), c in canonical_map.items()}
+    with open(mapping_output_path, 'w', encoding='utf-8') as f:
+        json.dump(mapping_serialisable, f, ensure_ascii=False, indent=2)
+    print(f'Mapping saved to {mapping_output_path}.')
+
+    # --- Apply mapping and write canonicalised output ---
+    with open(output_path, 'w', encoding='utf-8') as f_out:
+        for triplet in triplets:
+            subj_key = (triplet['subject_type'], triplet['subject_value'])
+            obj_key = (triplet['object_type'], triplet['object_value'])
+            triplet['subject_value'] = canonical_map.get(subj_key, triplet['subject_value'])
+            triplet['object_value'] = canonical_map.get(obj_key, triplet['object_value'])
+            f_out.write(json.dumps(triplet, ensure_ascii=False) + '\n')
+
+    end_time = time()
+    print(f'Canonicalised graph database saved to {output_path} in {end_time - start_time:.2f} seconds.\n')
+
+
+# ==========================================
+# === Filtering of the Graph Database ===
+# ==========================================
+
+### Function that removes triplets whose subject or object value is structurally invalid for its
+### declared entity type. Filtering is applied only to the entity types listed in entity_types_to_filter.
+### The following rules flag a value as invalid:
+###   - Matches a date pattern (German DD.MM.YYYY or ISO YYYY-MM-DD)
+###   - Matches a URL or e-mail pattern
+###   - Consists entirely of digits, punctuation, or numeric symbols
+###   - Exceeds max_words words (indicates a descriptive sentence rather than an entity name)
+### Rejected triplets are written to a separate file for manual inspection.
+# Input:
+# - [str] input_path: path to the jsonl file containing the graph database to filter
+# - [str] output_path: path to the jsonl file where the filtered graph database should be saved
+# - [str] rejected_output_path: path to the jsonl file where rejected triplets should be saved
+# - [List[str]] entity_types_to_filter: entity types to apply the validation rules to
+# - [int] max_words: maximum number of words allowed in a valid entity value
+# Output:
+# - None
+def filter_graph_database(
+        input_path: str,
+        output_path: str,
+        rejected_output_path: str,
+        entity_types_to_filter: List[str] = None,
+        max_words: int = 20
+) -> None:
+
+    if entity_types_to_filter is None:
+        entity_types_to_filter = ['APPLICANT', 'FUNDING_BODY', 'PERSON', 'LOCATION']
+
+    start_time = time()
+    print('\nFiltering invalid entity values from the graph database ...')
+
+    with open(input_path, 'r', encoding='utf-8') as f:
+        triplets = [json.loads(line) for line in f]
+    print(f'Loaded {len(triplets)} triplets from {input_path}.')
+
+    # Compile patterns that indicate a value is structurally not a named entity
+    _months = (
+        r'Jan(?:uary|uar)?|Feb(?:ruary|ruar)?|Mar(?:ch)?|März?|'
+        r'Apr(?:il)?|May|Mai|Jun(?:e|i)?|Jul(?:y|i)?|Aug(?:ust)?|'
+        r'Sep(?:tember)?|Oct(?:ober)?|Okt(?:ober)?|Nov(?:ember)?|'
+        r'Dec(?:ember)?|Dez(?:ember)?'
+    )
+    invalid_patterns = [
+        re.compile(r'^\d{1,2}\.\d{1,2}\.\d{2,4}$'),                        # German numeric date: 21.03.2025
+        re.compile(r'^\d{4}-\d{2}-\d{2}'),                                  # ISO date: 2025-03-21
+        re.compile(rf'\b(?:{_months})\b.{{0,20}}\b(?:19|20)\d{{2}}\b', re.IGNORECASE),  # Written-out date: "December 31, 2021" / "31. März 2025"
+        re.compile(r'^[\d\s.,;:%()/\-+]+$'),                                # Purely numeric / formula
+        re.compile(r'https?://', re.IGNORECASE),                            # URL with protocol
+        re.compile(r'\bwww\.', re.IGNORECASE),                              # URL without protocol
+        re.compile(r'[\w.\-]+@[\w.\-]+\.\w+'),                              # E-mail address
+    ]
+
+    def is_invalid(entity_type: str, value: str) -> bool:
+        if entity_type not in entity_types_to_filter:
+            return False
+        if len(value.split()) > max_words:
+            return True
+        for pattern in invalid_patterns:
+            if pattern.search(value):
+                return True
+        return False
+
+    kept = []
+    rejected = []
+    rejection_counts: Dict[str, int] = {}
+
+    for triplet in triplets:
+        subj_invalid = is_invalid(triplet['subject_type'], triplet['subject_value'])
+        obj_invalid = is_invalid(triplet['object_type'], triplet['object_value'])
+
+        if subj_invalid or obj_invalid:
+            rejected.append(triplet)
+            if subj_invalid:
+                rejection_counts[triplet['subject_type']] = rejection_counts.get(triplet['subject_type'], 0) + 1
+            if obj_invalid:
+                rejection_counts[triplet['object_type']] = rejection_counts.get(triplet['object_type'], 0) + 1
+        else:
+            kept.append(triplet)
+
+    with open(output_path, 'w', encoding='utf-8') as f_out:
+        for triplet in kept:
+            f_out.write(json.dumps(triplet, ensure_ascii=False) + '\n')
+
+    with open(rejected_output_path, 'w', encoding='utf-8') as f_out:
+        for triplet in rejected:
+            f_out.write(json.dumps(triplet, ensure_ascii=False) + '\n')
+
+    end_time = time()
+    pct = 100 * len(rejected) / len(triplets) if triplets else 0
+    print(f'Kept {len(kept)} triplets, rejected {len(rejected)} ({pct:.1f}%).')
+    if rejection_counts:
+        print('  Rejections by entity type:')
+        for t, count in sorted(rejection_counts.items(), key=lambda x: -x[1]):
+            print(f'    {t}: {count}')
+    print(f'Rejected triplets saved to {rejected_output_path} for inspection.')
+    print(f'Filtered graph database saved to {output_path} in {end_time - start_time:.2f} seconds.\n')
+
+
 ### Helper function that converts the list of topics into a one-hot vector representation so that it can be added to the ChromaDB metadata
 # Input:
 # - [List[str]] topic_list: a list of the topics associated to a given text chunk (can be empty)
@@ -1480,6 +1907,47 @@ if __name__ == "__main__":
             prompt_filepath=parameters.get('prompt_filepath'),
             chunk_batch=parameters.get('chunk_batch',4),
             temperature=parameters.get('temperature',0.1)
+        )
+
+    ### Split conjunction triplets in the graph database
+    if run_steps.get('split_graph_database', False):
+        print("\n--- Splitting conjunction triplets in the graph database ---")
+        parameters = config.get('split_graph_database', {})
+        split_conjunction_triplets(
+            input_path=parameters.get('input_path'),
+            output_path=parameters.get('output_path'),
+            entity_types_to_split=parameters.get('entity_types_to_split', None),
+            conjunction_markers=parameters.get('conjunction_markers', None),
+            min_part_words=parameters.get('min_part_words', 2)
+        )
+
+    ### Canonicalise entity values in the graph database
+    if run_steps.get('canonicalise_graph_database', False):
+        print("\n--- Canonicalising entity values in the graph database ---")
+        parameters = config.get('canonicalise_graph_database', {})
+        canonicalise_graph_database(
+            input_path=parameters.get('input_path'),
+            output_path=parameters.get('output_path'),
+            mapping_output_path=parameters.get('mapping_output_path'),
+            embedding_model_path=parameters.get('embedding_model_path', 'sentence-transformers/paraphrase-multilingual-mpnet-base-v2'),
+            similarity_threshold=parameters.get('similarity_threshold', 0.75),
+            token_overlap_threshold=parameters.get('token_overlap_threshold', 0.5),
+            department_separators=parameters.get('department_separators', None),
+            conjunction_markers=parameters.get('conjunction_markers', None),
+            entity_types_normalise_only=parameters.get('entity_types_normalise_only', None),
+            entity_types_to_canonicalise=parameters.get('entity_types_to_canonicalise', None)
+        )
+
+    ### Filter invalid entity values from the graph database
+    if run_steps.get('filter_graph_database', False):
+        print("\n--- Filtering invalid entity values from the graph database ---")
+        parameters = config.get('filter_graph_database', {})
+        filter_graph_database(
+            input_path=parameters.get('input_path'),
+            output_path=parameters.get('output_path'),
+            rejected_output_path=parameters.get('rejected_output_path'),
+            entity_types_to_filter=parameters.get('entity_types_to_filter', None),
+            max_words=parameters.get('max_words', 20)
         )
 
     ### Build the ChromaDB structured database for the graph RAG
