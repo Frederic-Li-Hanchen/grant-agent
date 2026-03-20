@@ -79,7 +79,10 @@ def compute_metrics(gt_path: str, gen_path: str, output_filepath: str) -> None:
     scorer = BARTScorer(device=device, checkpoint='facebook/bart-large-cnn')
     scorer.load(path='BARTScore/bart_score.pth')
 
-    # Loop on the files
+    # --- First pass: compute cheap metrics (BLEU, ROUGE) per pair and collect all
+    # predictions/references for the batched neural metrics (BertScore, BartScore). ---
+    neural_pairs = []  # list of (file, key, prediction, reference) for batched scoring
+
     for gt_file, gen_file in zip(gt_files, gen_files):
         # Check if the files match
         if gt_file != gen_file:
@@ -124,16 +127,26 @@ def compute_metrics(gt_path: str, gen_path: str, output_filepath: str) -> None:
             assert rouge_result is not None, f"ROUGE score is None for {gt_file} on key {key}"
             results.append({'file': gt_file, 'field': key, 'metric': 'ROUGE-1', 'score': rouge_result['rouge1']})
 
-            # Compute BertScore
-            # bert_score.score returns (precision, recall, f1)
-            _, _, bert_f1 = bert_score.score([prediction], [[reference]], lang='en', verbose=False)
-            results.append({'file': gt_file, 'field': key, 'metric': 'BertScore_F1', 'score': bert_f1.item()})
+            # Queue pair for batched neural scoring
+            neural_pairs.append((gt_file, key, prediction, reference))
 
-            # Compute BartScore
-            score1 = scorer.score(srcs=[reference], tgts=[prediction])[0]
-            score2 = scorer.score(srcs=[prediction], tgts=[reference])[0]
-            score = (score1+score2)/2
-            results.append({'file': gt_file, 'field': key, 'metric': 'BartScore', 'score': score})
+    # --- Second pass: compute BertScore and BartScore in a single batched call each.
+    # Batching amortises model loading and forward-pass overhead across all pairs at once,
+    # giving a large speedup over calling the models one pair at a time. ---
+    if neural_pairs:
+        all_preds = [p for _, _, p, _ in neural_pairs]
+        all_refs  = [r for _, _, _, r in neural_pairs]
+
+        print(f"\nComputing BertScore over {len(neural_pairs)} pairs (batched) ...")
+        _, _, bert_f1_all = bert_score.score(all_preds, all_refs, lang='en', verbose=False, batch_size=64)
+
+        print(f"Computing BartScore over {len(neural_pairs)} pairs (batched) ...")
+        bart_fwd = scorer.score(srcs=all_refs, tgts=all_preds, batch_size=8)
+        bart_bwd = scorer.score(srcs=all_preds, tgts=all_refs, batch_size=8)
+
+        for i, (gt_file, key, _, _) in enumerate(neural_pairs):
+            results.append({'file': gt_file, 'field': key, 'metric': 'BertScore_F1', 'score': bert_f1_all[i].item()})
+            results.append({'file': gt_file, 'field': key, 'metric': 'BartScore',    'score': (bart_fwd[i] + bart_bwd[i]) / 2})
 
     if results:
         metrics_df = pd.DataFrame(results)
@@ -194,7 +207,7 @@ def plot_metrics(csv_filepath: str, output_folder_path: str) -> None:
         kind='box',    # Specify the plot kind
         order=field_order,
         col_wrap=2,    # Wrap the subplots into 2 columns
-        sharex=True,   # Share the x-axis labels
+        sharex=False,  # Each subplot shows its own x-axis labels (field names)
         sharey=False,  # Each subplot has its own y-axis scale
         height=5, 
         aspect=1.5
@@ -245,10 +258,10 @@ def plot_metrics(csv_filepath: str, output_folder_path: str) -> None:
         col='metric', 
         kind='violin', 
         order=field_order, 
-        col_wrap=2, 
-        sharex=True, 
-        sharey=False, 
-        height=5, 
+        col_wrap=2,
+        sharex=False,  # Each subplot shows its own x-axis labels (field names)
+        sharey=False,
+        height=5,
         aspect=1.5)
     g.fig.suptitle('Metric Score Distributions by Field', fontsize=16, y=1.03)
     g.set_axis_labels("Field", "Score")
