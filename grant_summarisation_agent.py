@@ -1,19 +1,23 @@
-from langchain.chains import RetrievalQA
-from langchain_community.document_loaders import PyPDFLoader, UnstructuredPDFLoader, TextLoader
-from langchain_community.vectorstores import DocArrayInMemorySearch
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from google.api_core.exceptions import ResourceExhausted
 from tenacity import retry, stop_after_attempt, wait_random_exponential, retry_if_exception_type
+from sentence_transformers import SentenceTransformer
+from utils import load_config_from_yaml
+import numpy as np
+import pickle
 import json
 import os
+import sys
 from dotenv import load_dotenv
 from time import time
 #import pytesseract
 from pdb import set_trace as st
 
 
-### Extract information from a document containing a grant call. API key is expected to be contained in a .env file.
+### Extract information from a document containing a grant call using vector-based RAG.
+### The document is chunked, embedded and stored in an in-memory vector store.
+### Each topic query is answered by retrieving the most relevant chunks and passing them to the LLM.
+### API key is expected to be contained in a .env file.
 # Input arguments:
 # - [str] doc_path: path to the document (currently either PDF or text)
 # - [str] output_path: path to the folder where the resulting json file will be saved. If left empty, the file is not saved.
@@ -25,7 +29,7 @@ from pdb import set_trace as st
 # - [int] chunk_overlap: overlap between the text chunks
 # Output:
 # - [dict] extracted_info: structured information extracted from the document
-def extract_info_from_document(
+def vector_rag_info_extraction(
         doc_path: str,
         prompts_filepath: str,
         output_path: str = '', 
@@ -46,6 +50,12 @@ def extract_info_from_document(
     - Contact person(s) information for further questions if required
     - Any other relevant information that could be useful for the grant application process
     """
+    from langchain.chains import RetrievalQA
+    from langchain_community.document_loaders import PyPDFLoader, UnstructuredPDFLoader, TextLoader
+    from langchain_community.vectorstores import DocArrayInMemorySearch
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
     start = time()
 
     # Check if the generated output already exists. If yes, skip to processing.
@@ -155,6 +165,192 @@ def extract_info_from_document(
 
 
 
+### Extract information from a document containing a grant call using Graph RAG.
+### Uses a pre-built knowledge graph and community summaries to provide context to the LLM.
+### Broad topics (objective, criteria, procedure, misc) are answered via semantic search over
+### community summaries filtered to the target document. Specific topics (deadline, max_funding,
+### max_duration, contact) are answered via direct predicate-based graph traversal, with a
+### fallback to community search if no relevant edges are found.
+### API key is expected to be contained in a .env file.
+# Input arguments:
+# - [str] doc_path: path to the document (used to derive the document_id)
+# - [str] knowledge_graph_path: path to the pickled NetworkX knowledge graph
+# - [str] structured_database_path: path to the structured database JSONL (for raw chunk text)
+# - [str] community_summaries_path: path to the community summaries JSON
+# - [str] prompts_filepath: path to the prompts JSON file
+# - [str] output_path: folder where the resulting JSON file is saved (skipped if empty)
+# - [str] model_name: Gemini model name
+# - [float] temperature: LLM temperature
+# - [int] max_tokens: maximum tokens to generate
+# - [int] top_k_communities: number of top communities to retrieve for broad topics
+# - [str] embedding_model_name: sentence-transformers model for community summary embeddings
+# Output:
+# - [dict] extracted_info: structured information extracted from the document
+def graph_rag_info_extraction(
+        doc_path: str,
+        knowledge_graph_path: str,
+        structured_database_path: str,
+        community_summaries_path: str,
+        prompts_filepath: str,
+        output_path: str = '',
+        model_name: str = 'gemini-2.5-flash',
+        temperature: float = 0.1,
+        max_tokens: int = 4000,
+        top_k_communities: int = 3,
+        embedding_model_name: str = 'paraphrase-multilingual-mpnet-base-v2') -> dict:
+
+    start = time()
+
+    # --- Check for existing output ---
+    file_name = os.path.basename(doc_path).replace('.txt', '.json').replace('.pdf', '.json')
+    if len(output_path) > 0:
+        output_file = os.path.join(output_path, file_name)
+        if os.path.isfile(output_file):
+            print(f"Output file {file_name} already exists. Skipping.")
+            with open(output_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+
+    # document_id is the filename without extension — matches the prefix of chunk_ids in the graph
+    document_id = os.path.splitext(os.path.basename(doc_path))[0]
+    print(f"\nGraph RAG info extraction for document: {document_id}")
+
+    # --- Load resources ---
+    print("  Loading graph, chunk database and community summaries ...")
+    with open(knowledge_graph_path, 'rb') as f:
+        G = pickle.load(f)
+
+    with open(community_summaries_path, 'r', encoding='utf-8') as f:
+        community_summaries = json.load(f)
+
+    chunk_db = {}
+    with open(structured_database_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            chunk = json.loads(line)
+            chunk_db[chunk['metadata']['id']] = chunk['text']
+
+    with open(prompts_filepath, 'r', encoding='utf-8') as f:
+        queries = json.load(f)
+
+    # --- LLM ---
+    load_dotenv()
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    if gemini_api_key is None:
+        raise ValueError("GEMINI_API_KEY not found in .env")
+    llm = ChatGoogleGenerativeAI(model=model_name, temperature=temperature,
+                                 max_tokens=max_tokens, google_api_key=gemini_api_key)
+
+    # --- Identify document-relevant edges and communities ---
+    # An edge is document-relevant if at least one of its chunk_ids originates from this document.
+    # A community is document-relevant if any of its nodes is an endpoint of such an edge.
+    doc_edge_data = []  # list of (u, v, edge_attrs, doc_chunk_ids)
+    doc_community_ids = set()
+
+    for u, v, data in G.edges(data=True):
+        doc_chunk_ids = [cid for cid in data.get('chunk_ids', []) if cid.startswith(document_id)]
+        if doc_chunk_ids:
+            doc_edge_data.append((u, v, data, doc_chunk_ids))
+            doc_community_ids.add(str(G.nodes[u].get('community_id', '')))
+            doc_community_ids.add(str(G.nodes[v].get('community_id', '')))
+    doc_community_ids.discard('')
+
+    print(f"  Found {len(doc_community_ids)} relevant communities and {len(doc_edge_data)} relevant edges.")
+
+    # --- Embed document community summaries for broad topic retrieval ---
+    doc_summaries = {cid: community_summaries[cid] for cid in doc_community_ids if cid in community_summaries}
+    embedder = SentenceTransformer(embedding_model_name)
+    summary_ids = list(doc_summaries.keys())
+    summary_embeddings = embedder.encode(
+        [doc_summaries[cid] for cid in summary_ids],
+        normalize_embeddings=True, show_progress_bar=False
+    )  # shape: (N, D)
+
+    # --- Retrieval helpers ---
+
+    # For broad topics: find top-k communities by cosine similarity to the query, then
+    # collect their community summary and the raw text of associated document chunks.
+    def retrieve_broad_context(query: str) -> str:
+        if not summary_ids:
+            return ""
+        query_emb = embedder.encode([query], normalize_embeddings=True)[0]
+        scores = summary_embeddings @ query_emb
+        top_indices = np.argsort(scores)[::-1][:top_k_communities]
+
+        context_parts = []
+        for idx in top_indices:
+            cid = summary_ids[idx]
+            context_parts.append(f"[Community summary]: {doc_summaries[cid]}")
+            community_chunk_ids = {
+                doc_cid
+                for u, v, _, doc_cids in doc_edge_data
+                if str(G.nodes[u].get('community_id', '')) == cid
+                or str(G.nodes[v].get('community_id', '')) == cid
+                for doc_cid in doc_cids
+            }
+            texts = [chunk_db[cid] for cid in community_chunk_ids if cid in chunk_db]
+            if texts:
+                context_parts.append("[Source text]:\n" + "\n---\n".join(texts[:5]))
+        return "\n\n".join(context_parts)
+
+    # For specific topics: find edges whose predicates contain the topic's keyword(s), then
+    # surface the object entity values as graph-extracted hints alongside the raw source chunks.
+    # Falls back to broad community search if no matching edges are found.
+    SPECIFIC_PREDICATE_KEYWORDS = {
+        'deadline':     ['DEADLINE'],
+        'max_funding':  ['FUNDING', 'AMOUNT'],
+        'max_duration': ['DURATION'],
+        'contact':      ['CONTACT'],
+    }
+
+    def retrieve_specific_context(topic: str, query: str) -> str:
+        keywords = SPECIFIC_PREDICATE_KEYWORDS.get(topic, [])
+        graph_values, relevant_chunk_ids = [], set()
+
+        for _, v, data, doc_cids in doc_edge_data:
+            predicates = data.get('predicates', [])
+            if any(kw in pred.upper() for pred in predicates for kw in keywords):
+                graph_values.append(G.nodes[v].get('entity_value', ''))
+                relevant_chunk_ids.update(doc_cids)
+
+        if not graph_values:
+            return retrieve_broad_context(query)
+
+        context_parts = [f"[Graph-extracted values for '{topic}']: {'; '.join(set(graph_values))}"]
+        texts = [chunk_db[cid] for cid in relevant_chunk_ids if cid in chunk_db]
+        if texts:
+            context_parts.append("[Source text]:\n" + "\n---\n".join(texts[:5]))
+        return "\n\n".join(context_parts)
+
+    # --- LLM extraction with retry ---
+    BROAD_TOPICS = {'objective', 'inclusion_criteria', 'exclusion_criteria', 'procedure', 'misc'}
+
+    @retry(
+        wait=wait_random_exponential(min=1, max=60),
+        stop=stop_after_attempt(6),
+        retry=(retry_if_exception_type(ResourceExhausted) | retry_if_exception_type(Exception))
+    )
+    def extract_with_retry(context: str, query: str) -> str:
+        prompt = f"[Context from knowledge graph]:\n{context}\n\n{query}"
+        response = llm.invoke([('human', prompt)])
+        return str(response.content).strip()
+
+    extracted_info = {}
+    for topic, query in queries.items():
+        print(f"  Extracting: {topic} ...")
+        context = retrieve_broad_context(query) if topic in BROAD_TOPICS else retrieve_specific_context(topic, query)
+        extracted_info[topic] = extract_with_retry(context, query)
+
+    # --- Save ---
+    if len(output_path) > 0:
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
+        with open(os.path.join(output_path, file_name), 'w', encoding='utf-8') as f:
+            json.dump(extracted_info, f, indent=4, ensure_ascii=False)
+
+    end = time()
+    print(f"Graph RAG extraction for {document_id} completed in {end - start:.2f} seconds.")
+    return extracted_info
+
+
 ### Extract information from webpage
 ### TODO: implement once the information extraction agent from text is properly working
 def extract_info_from_webpage(webpage_url):
@@ -185,30 +381,47 @@ def extract_info_from_webpage(webpage_url):
 ### Main function
 if __name__ == "__main__":
 
-    # Hyper-parameters
-    model_name = "gemini-2.5-flash" # NOTE: this can be changed to any other model name supported by the Google Generative AI API
-    data_folder = r'C:\Users\Frederic\Documents\Programming\Grant-agent\evaluation\data'
-    prompts_filepath = r'C:\Users\Frederic\Documents\Programming\Grant-agent\prompts\agent_prompts.json'
-    output_path = r'C:\Users\Frederic\Documents\Programming\Grant-agent\evaluation\generated_outputs\\'+ model_name 
-    # data_folder = r'C:\Users\Frederic\Documents\Programming\Grant-agent\evaluation\prompt_val_data' # NOTE: smaller sample of 5 documents for prompt testing
-    # output_path = r'C:\Users\Frederic\Documents\Programming\Grant-agent\evaluation\generated_outputs\\'+ model_name + '_prompt_val' # NOTE: smaller sample of 5 documents for prompt testing
-    chunk_size = 4000
-    chunk_overlap = 20
-    temperature = 0.1
-    max_tokens = 4000
-    model_provider = 'google_genai'
-    
-    # Loop on the examples with associated ground truth
-    doc_list = [e for e in os.listdir(data_folder) if e.endswith('txt')]
-    for doc_name in doc_list:
-        doc_path = os.path.join(data_folder,doc_name)
-        extract_info_from_document(
-            doc_path=doc_path,
-            prompts_filepath=prompts_filepath,
-            output_path=output_path,
-            model_name=model_name,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            model_provider=model_provider,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap)
+    try:
+        config = load_config_from_yaml(r'./config.yaml')
+    except Exception:
+        print("ERROR: YAML config file './config.yaml' not found!")
+        sys.exit(1)
+
+    run_steps = config.get('run_steps', {})
+
+    ### Run vector RAG information extraction
+    if run_steps.get('run_vector_rag', False):
+        print("\n--- Running vector RAG info extraction ---")
+        p = config.get('vector_rag', {})
+        data_folder = p.get('data_folder')
+        doc_list = [e for e in os.listdir(data_folder) if e.endswith('.txt')]
+        for doc_name in doc_list:
+            vector_rag_info_extraction(
+                doc_path=os.path.join(data_folder, doc_name),
+                prompts_filepath=p.get('prompts_filepath'),
+                output_path=p.get('output_path', ''),
+                model_name=p.get('model_name', 'gemini-2.5-flash'),
+                temperature=p.get('temperature', 0.1),
+                max_tokens=p.get('max_tokens', 4000),
+                chunk_size=p.get('chunk_size', 4000),
+                chunk_overlap=p.get('chunk_overlap', 20))
+
+    ### Run graph RAG information extraction
+    if run_steps.get('run_graph_rag', False):
+        print("\n--- Running graph RAG info extraction ---")
+        p = config.get('graph_rag', {})
+        data_folder = p.get('data_folder')
+        doc_list = [e for e in os.listdir(data_folder) if e.endswith('.txt')]
+        for doc_name in doc_list:
+            graph_rag_info_extraction(
+                doc_path=os.path.join(data_folder, doc_name),
+                knowledge_graph_path=p.get('knowledge_graph_path'),
+                structured_database_path=p.get('structured_database_path'),
+                community_summaries_path=p.get('community_summaries_path'),
+                prompts_filepath=p.get('prompts_filepath'),
+                output_path=p.get('output_path', ''),
+                model_name=p.get('model_name', 'gemini-2.5-flash'),
+                temperature=p.get('temperature', 0.1),
+                max_tokens=p.get('max_tokens', 4000),
+                top_k_communities=p.get('top_k_communities', 3),
+                embedding_model_name=p.get('embedding_model_name', 'paraphrase-multilingual-mpnet-base-v2'))
