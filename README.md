@@ -30,6 +30,24 @@ Agent retrieving key information from grant calls (Bekanntmachungen) issued by G
 
 ---
 
+### Usage
+
+1. Save the newsletter email as a plain-text file (e.g. `mail.txt`).
+2. Set your Gemini API key in a `.env` file at the repo root:
+   ```
+   GEMINI_API_KEY=your_key_here
+   ```
+3. Run the agent:
+   ```
+   python agent/agent.py --input mail.txt --output results.xlsx
+   ```
+   The agent identifies funding-call links in the email, fetches each call, extracts
+   the key fields via RAG, and writes the results to `results.xlsx`.
+
+The LLM provider and all other parameters are configured in `config.yaml`.
+
+---
+
 ### Current status
-A comparative study of RAG approaches (vector RAG with Gemini-2.5-Flash and fine-tuned Mistral-7B-Instruct, graph RAG) was carried out on a dataset of BMBF Bekanntmachungen. Vector RAG with Gemini-2.5-Flash was identified as the most promising approach for the production agent, followed closely by the fined-tuned Mistral-7B-Instruct approach.
-The agent implementation is in progress.
+A comparative study of RAG approaches (vector RAG with Gemini-2.5-Flash and fine-tuned Mistral-7B-Instruct, graph RAG) was carried out on a dataset of BMBF Bekanntmachungen. Vector RAG with Gemini-2.5-Flash was identified as the most promising approach for the production agent, followed closely by the fine-tuned Mistral-7B-Instruct approach.
+The preliminary agent implementation is complete.
