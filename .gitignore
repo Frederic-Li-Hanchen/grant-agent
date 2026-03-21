@@ -26,3 +26,4 @@ requirements.txt
 test.py
 *notes.txt
 notes/
+tmp/
