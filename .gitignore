@@ -13,6 +13,7 @@ notes/
 logs/
 .env
 .venv
+.claude/
 venv/
 log*.txt
 __pycache__/
@@ -20,4 +21,4 @@ test.py
 *notes.txt
 *.zip
 requirements.txt
-BARTScore/
+BARTScore/*

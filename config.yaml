@@ -35,7 +35,7 @@ run_steps:
 # === Reusable variables ===
 # ===========================
 vars:
-  agent_model: &agent_model 'fine-tuned-mistral7b-instruct'
+  agent_model: &agent_model 'gemini-2.5-flash_prompt_v0' # Name of the agent model to be used in shared paths and evaluation outputs
   llm_judge: &llm_judge 'llama3-70b-8192'
   
 # --- Configuration for each step ---
@@ -155,7 +155,11 @@ vector_rag:
   data_folder: 'evaluation/data' # Folder containing the Bekanntmachungen text files to process
   prompts_filepath: 'prompts/agent_prompts.json' # Path to the prompts JSON file
   output_path: 'evaluation/generated_outputs/vector_rag_gemini-2.5-flash' # Folder where extracted JSON files are saved
-  model_name: 'gemini-2.5-flash' # Gemini model name
+  model_provider: 'google_genai' # LLM provider: 'google_genai' (Gemini API) or 'huggingface' (local model)
+  model_name: 'gemini-2.5-flash' # Model name — Gemini model ID or HuggingFace adapter ID
+  autotrain_base_model_name: '' # Base model ID for AutoTrain LoRA adapters (huggingface only)
+                                 # e.g. 'mistralai/Mistral-7B-Instruct-v0.2' for 'frederic-li-hanchen/bekanntmachung-llm-v1'
+  embedding_model_name: 'paraphrase-multilingual-mpnet-base-v2' # Local embeddings model (huggingface only)
   temperature: 0.1 # LLM temperature
   max_tokens: 4096 # Maximum tokens to generate per query
   chunk_size: 4000 # Size of text chunks for the in-memory vector store
@@ -189,8 +193,8 @@ compute_huggingface_inferences:
 # =================================
 evaluation_shared_paths:
   gt_path: &gt_path './evaluation/ground_truth' # Path to the folder containing the json files with the ground truth
-  gen_path: &gen_path './evaluation/generated_outputs/graph_rag_gemini-2.5-flash' # Path to the folder containing the json files with the agent generated information
-  traditional_metrics_csv_file: &traditional_metrics_csv_path './evaluation/metrics/graph_rag_gemini-2.5-flash/metrics.csv' # Path to the CSV file where to save the BLEU, ROUGE and BertScore evaluation metrics
+  gen_path: &gen_path './evaluation/generated_outputs/{agent_model}' # Path to the folder containing the json files with the agent generated information
+  traditional_metrics_csv_file: &traditional_metrics_csv_path './evaluation/metrics/{agent_model}/metrics.csv' # Path to the CSV file where to save the BLEU, ROUGE and BertScore evaluation metrics
   llm_scores_csv_filepath: &llm_scores_csv_filepath './evaluation/llm_as_judge/{agent_model}_judged_by_{llm_judge}.csv' # Path for LLM as judge scores
 
 compute_traditional_metrics:
@@ -200,7 +204,7 @@ compute_traditional_metrics:
 
 plot_traditional_metrics:
   csv_filepath: *traditional_metrics_csv_path
-  output_folder_path: './evaluation/plots/graph_rag_gemini-2.5-flash' # Path to the folder where boxplots and violin plots of the evaluation metrics should be saved
+  output_folder_path: './evaluation/plots/{agent_model}' # Path to the folder where boxplots and violin plots of the evaluation metrics should be saved
 
 run_llm_as_judge:
   model: *llm_judge # Name of the LLM to be used as judge
