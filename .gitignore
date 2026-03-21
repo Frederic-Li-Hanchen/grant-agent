@@ -1,4 +1,6 @@
 # .gitignore
+
+# Research pilot data and artifacts (all paths match regardless of depth)
 data/
 meta_data/
 debug_data/
@@ -9,16 +11,18 @@ ground_truth/
 supervised_fine_tuning/
 graph_rag/
 chroma_db/
-notes/
 logs/
+BARTScore/
+
+# Environment and tooling
 .env
 .venv
 .claude/
 venv/
-log*.txt
 __pycache__/
-test.py
-*notes.txt
+log*.txt
 *.zip
 requirements.txt
-BARTScore/*
+test.py
+*notes.txt
+notes/

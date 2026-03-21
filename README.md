@@ -1,14 +1,35 @@
 ### grant-agent
-Agent retrieving key information from grant calls issued by the German Federal Ministries (e.g. BMFTR, BMWE, etc.)
+Agent retrieving key information from grant calls (Bekanntmachungen) issued by German Federal Ministries (e.g. BMFTR, BMWK, etc.)
 
-Repository contents:
-- config.yaml: config file of parameters 
-- build_database.py: script to scrape a list of cleaned text data files containing Bekanntmachungen (currently only from the BMFTR website)
-- check_database_quality.py: script to check the quality of the text data files formatting 
-- grant_summarisation_agent.py: script to extract specific key information from a grant document (currently only in PDF or txt format)
-- create_ground_truth.py: helper script to create a ground truth for fine-tuning and evaluation
-- evaluate_agent.py: script to evaluate the outputs produced by the agent using various evaluation strategies and plot the results 
-- huggingface_supervised_fine_tuning.py: script to fine-tune a LLM on annotated data using HuggingFace
-- utils.py: script containing helper functions
-- prompts/: folder containing json files with template information for prompts 
-- pyproject.toml and uv.lock: files containing requirements for Python libraries dependencies
+---
+
+### Repository structure
+
+**`agent/`** — production agent implementation
+- `agent.py`: main entrypoint (`python agent/agent.py --input mail.txt --output results.xlsx`)
+- `fetcher.py`: link identification and call text fetching (HTML scraping and PDF download)
+- `extractor.py`: RAG-based extraction of key fields from call documents
+- `exporter.py`: Excel export of extracted results
+
+**`research/`** — pilot study: comparative evaluation of RAG approaches on BMBF Bekanntmachungen
+- `build_database.py`: scrape and preprocess Bekanntmachungen text files; build vector and graph databases
+- `check_database_quality.py`: check formatting quality of scraped text files
+- `grant_summarisation_agent.py`: vector RAG and graph RAG extraction (Gemini and fine-tuned Mistral)
+- `create_ground_truth.py`: helper script to create ground truth for fine-tuning and evaluation
+- `evaluate_agent.py`: compute evaluation metrics (BLEU, ROUGE, BERTScore, BARTScore) and plot results
+- `huggingface_supervised_fine_tuning.py`: fine-tune a LLM on annotated data using HuggingFace
+- `config.yaml`: configuration parameters for the research pipeline
+
+**`prompts/`** — shared JSON prompt templates (used by both research and agent)
+
+**`notes/`** — project documentation
+- `agent_specifications.txt`: specifications and work plan for the agent implementation
+
+**`utils.py`** — shared helper functions (config loading, web scraping, etc.)
+**`pyproject.toml` / `uv.lock`** — Python dependency configuration
+
+---
+
+### Current status
+A comparative study of RAG approaches (vector RAG with Gemini-2.5-Flash and fine-tuned Mistral-7B-Instruct, graph RAG) was carried out on a dataset of BMBF Bekanntmachungen. Vector RAG with Gemini-2.5-Flash was identified as the most promising approach for the production agent.
+The agent implementation is in progress.
