@@ -31,5 +31,5 @@ Agent retrieving key information from grant calls (Bekanntmachungen) issued by G
 ---
 
 ### Current status
-A comparative study of RAG approaches (vector RAG with Gemini-2.5-Flash and fine-tuned Mistral-7B-Instruct, graph RAG) was carried out on a dataset of BMBF Bekanntmachungen. Vector RAG with Gemini-2.5-Flash was identified as the most promising approach for the production agent.
+A comparative study of RAG approaches (vector RAG with Gemini-2.5-Flash and fine-tuned Mistral-7B-Instruct, graph RAG) was carried out on a dataset of BMBF Bekanntmachungen. Vector RAG with Gemini-2.5-Flash was identified as the most promising approach for the production agent, followed closely by the fined-tuned Mistral-7B-Instruct approach.
 The agent implementation is in progress.
