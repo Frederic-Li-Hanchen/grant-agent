@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import load_config_from_yaml
 from fetcher import extract_call_links, fetch_call_text
-from extractor import extract_fields
+from extractor import build_llm_and_embeddings, extract_fields
 from exporter import export_to_excel
 
 
@@ -26,6 +26,11 @@ def main(input_path: str, output_path: str) -> None:
     # --- Identify call links ---
     urls = extract_call_links(email_text, config)
     print(f"Found {len(urls)} call link(s).")
+
+    # --- Load LLM and embeddings once ---
+    print("\nInitialising LLM and embeddings...")
+    llm, embeddings, retry_on = build_llm_and_embeddings(config)
+    print("Ready.\n")
 
     # --- Process each call ---
     records = []
@@ -49,7 +54,7 @@ def main(input_path: str, output_path: str) -> None:
 
         # Extract fields via RAG
         try:
-            fields = extract_fields(call_text, config)
+            fields = extract_fields(call_text, llm, embeddings, retry_on, config)
         except Exception as e:
             remark = f"{remark}; extraction error: {e}".lstrip('; ')
             print(f"  EXTRACTION FAILED: {e}")

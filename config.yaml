@@ -1,0 +1,54 @@
+### Agent configuration
+
+llm:
+  model_provider: huggingface        # 'google_genai' or 'huggingface'
+  model_name: frederic-li-hanchen/bekanntmachung-llm-v1        # google_genai: 'gemini-2.5-flash'
+                                      # huggingface:  'frederic-li-hanchen/bekanntmachung-llm-v1' (LoRA adapter ID)
+  temperature: 0.1
+  max_tokens: 4000
+  # google_genai-specific
+  google_embedding_model: models/gemini-embedding-001
+  # HuggingFace-specific (only used when model_provider is 'huggingface')
+  autotrain_base_model_name: mistralai/Mistral-7B-Instruct-v0.2   # base model for the LoRA adapter
+  embedding_model_name: paraphrase-multilingual-mpnet-base-v2
+
+rag:
+  chunk_size: 4000
+  chunk_overlap: 200
+  prompts_filepath: prompts/agent_prompts.json
+
+link_identification:
+  # Section headers in the newsletter email that delimit call-containing sections.
+  # URLs found outside these sections are ignored.
+  call_section_markers:
+    - "Neue Förderbekanntmachungen des Bundes"
+    - "Aktuelle Bewerbungsfristen in laufenden Bekanntmachungen"
+  # Substrings that disqualify a URL regardless of its section.
+  url_blacklist_patterns:
+    - ausschreibungen
+    - newsletter
+    - abbestellen
+    - abmelden
+    - impressum
+    - datenschutz
+    - facebook.com
+    - twitter.com
+    - x.com/
+    - instagram.com
+    - linkedin.com
+    - youtube.com
+    - "javascript:"
+    - survey
+
+fetch:
+  request_timeout: 15                 # seconds
+  min_request_delay: 1.0              # seconds between requests (random uniform)
+  max_request_delay: 3.0
+  min_text_length: 200                # characters; below this threshold the scraped page
+                                      # is considered empty and PDF fallback is attempted
+  pdf_relevance_keywords:             # used to score PDF link candidates on a page
+    - Bekanntmachung
+    - Förderrichtlinie
+    - Ausschreibung
+    - Förderaufruf
+    - Richtlinie

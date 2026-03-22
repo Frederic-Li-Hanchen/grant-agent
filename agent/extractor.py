@@ -15,37 +15,24 @@ from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_random_exponential, retry_if_exception_type
 
 
-def extract_fields(call_text: str, config: dict[str, Any]) -> dict:
+def build_llm_and_embeddings(config: dict[str, Any]) -> tuple:
     """
-    Extract target fields from a call document using vector RAG.
+    Initialise and return (llm, embeddings, retry_on) once for reuse across documents.
 
-    Args:
-        call_text: Plain text of the funding call.
-        config:    Agent configuration dict (from config.yaml).
+    Separating initialisation from per-document extraction avoids reloading a
+    large model for every call.
 
     Returns:
-        Dict with keys: objective, inclusion_criteria, exclusion_criteria,
-        deadline, max_funding, max_duration, procedure, contact, misc.
+        (llm, embeddings, retry_on) where retry_on is a tenacity retry condition.
     """
-    from langchain_classic.chains import RetrievalQA
-    from langchain_core.documents import Document
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-    from langchain_community.vectorstores import DocArrayInMemorySearch
-
     load_dotenv()
 
     llm_cfg = config.get('llm', {})
-    rag_cfg = config.get('rag', {})
-
     model_provider: str = llm_cfg.get('model_provider', 'google_genai')
     model_name: str = llm_cfg.get('model_name', 'gemini-2.5-flash')
     temperature: float = llm_cfg.get('temperature', 0.1)
     max_tokens: int = llm_cfg.get('max_tokens', 4000)
-    chunk_size: int = rag_cfg.get('chunk_size', 4000)
-    chunk_overlap: int = rag_cfg.get('chunk_overlap', 200)
-    prompts_filepath: str = rag_cfg.get('prompts_filepath', 'prompts/agent_prompts.json')
 
-    # --- LLM and embeddings setup ---
     if model_provider == 'google_genai':
         from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
         from google.api_core.exceptions import ResourceExhausted
@@ -76,8 +63,11 @@ def extract_fields(call_text: str, config: dict[str, Any]) -> dict:
 
         print(f'  Loading base model {autotrain_base_model_name!r} ...')
         hf_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        # Use device_map='cuda:0' rather than 'auto' to avoid layer offloading to
+        # CPU/disk, which causes merge_and_unload() to fail on meta-device parameters.
+        device_map = 'cuda:0' if torch.cuda.is_available() else 'cpu'
         base_model = AutoModelForCausalLM.from_pretrained(
-            autotrain_base_model_name, torch_dtype=hf_dtype, device_map='auto')
+            autotrain_base_model_name, torch_dtype=hf_dtype, device_map=device_map)
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
@@ -96,6 +86,33 @@ def extract_fields(call_text: str, config: dict[str, Any]) -> dict:
 
     else:
         raise ValueError(f"Unsupported model_provider {model_provider!r}. Choose 'google_genai' or 'huggingface'.")
+
+    return llm, embeddings, retry_on
+
+
+def extract_fields(call_text: str, llm: Any, embeddings: Any, retry_on: Any, config: dict[str, Any]) -> dict:
+    """
+    Extract target fields from a call document using vector RAG.
+
+    Args:
+        call_text:  Plain text of the funding call.
+        llm:        Pre-built LangChain LLM (from build_llm_and_embeddings).
+        embeddings: Pre-built LangChain embeddings (from build_llm_and_embeddings).
+        retry_on:   Tenacity retry condition (from build_llm_and_embeddings).
+        config:     Agent configuration dict (from config.yaml).
+
+    Returns:
+        Dict with keys: objective, inclusion_criteria, exclusion_criteria,
+        deadline, max_funding, max_duration, procedure, contact, misc.
+    """
+    from langchain_classic.chains import RetrievalQA
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from langchain_community.vectorstores import DocArrayInMemorySearch
+
+    rag_cfg = config.get('rag', {})
+    chunk_size: int = rag_cfg.get('chunk_size', 4000)
+    chunk_overlap: int = rag_cfg.get('chunk_overlap', 200)
+    prompts_filepath: str = rag_cfg.get('prompts_filepath', 'prompts/agent_prompts.json')
 
     # --- Build vector index from call text ---
     text_splitter = RecursiveCharacterTextSplitter(
