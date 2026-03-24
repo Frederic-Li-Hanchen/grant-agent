@@ -73,7 +73,7 @@ def main(input_path: str, output_path: str) -> None:
         print(f"  OK — {len(call_text)} chars, all fields extracted.")
 
     # --- Export to Excel ---
-    export_to_excel(records, output_path)
+    export_to_excel(records, output_path, config)
 
     end = time()
 

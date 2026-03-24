@@ -51,3 +51,27 @@ fetch:
     - Ausschreibung
     - Förderaufruf
     - Richtlinie
+
+excel_formatting:
+  # objective: highlight in light green if any of these topic keywords appear
+  # (customise to match your research interests)
+  objective_keywords:
+    - AI
+    - Artificial Intelligence
+    - Data Science
+    - Machine Learning
+    - Deep Learning
+
+  # inclusion_criteria: highlight in light green if any of these institution
+  # types appear (suggesting your institution may be eligible)
+  inclusion_keywords:
+    - non-university research institution
+    - non-university research and
+    - research institution
+
+  # exclusion_criteria: highlight in light red if any of these terms appear
+  # (flagging that restrictions may apply)
+  exclusion_keywords:
+    - non-university research institution
+    - non-university research and
+    - research institution
