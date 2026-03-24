@@ -7,6 +7,7 @@ Usage:
 import argparse
 import sys
 import os
+from time import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import load_config_from_yaml
@@ -16,6 +17,9 @@ from exporter import export_to_excel
 
 
 def main(input_path: str, output_path: str) -> None:
+
+    start = time()
+
     # --- Load config ---
     config = load_config_from_yaml('config.yaml')
 
@@ -71,9 +75,12 @@ def main(input_path: str, output_path: str) -> None:
     # --- Export to Excel ---
     export_to_excel(records, output_path)
 
+    end = time()
+
     # --- Summary ---
     print(f"\n{'='*50}")
-    print(f"Done. {len(urls)} link(s) found: {n_success} succeeded, {n_failed} failed.")
+    print(f"Extraction completed in {end - start:.2f} seconds.") 
+    print(f"{len(urls)} link(s) found: {n_success} succeeded, {n_failed} failed.")
     print(f"Results saved to: {output_path}")
 
 

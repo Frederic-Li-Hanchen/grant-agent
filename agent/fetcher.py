@@ -63,11 +63,11 @@ def extract_call_links(email_text: str, config: dict[str, Any]) -> list[str]:
     # Step 2: find URLs preceded by a call-entry date-range header
     # Pattern: DD.MM.YYYY - DD.MM.YYYY | *MINISTRY* | Bekanntmachung ... <URL>
     call_entry_re = re.compile(
-        r'\d{2}\.\d{2}\.\d{4}\s*[-–]\s*\d{2}\.\d{2}\.\d{4}'   # date range
-        r'\s*\|\s*\*?[\w\s]+\*?'                                 # ministry
-        r'\s*\|\s*Bekanntmachung'                                # call label
-        r'.{0,500}?'                                             # call title text (non-greedy)
-        r'<(https?://[^\s>]+)>',                                 # URL
+        r'\d{2}\.\d{2}\.\d{4}\s*[-–]\s*\d{2}\.\d{2}\.\d{4}'              # date range
+        r'\s*\|\s*\*?[\w\s]+\*?'                                            # ministry
+        r'\s*\|\s*(?:Bekanntmachung|Förderaufruf|Förderwettbewerb)'        # call label
+        r'.{0,500}?'                                                        # call title text (non-greedy)
+        r'<(https?://[^\s>]+)>',                                            # URL
         re.DOTALL
     )
 

@@ -1,9 +1,8 @@
 ### Agent configuration
 
 llm:
-  model_provider: huggingface        # 'google_genai' or 'huggingface'
-  model_name: frederic-li-hanchen/bekanntmachung-llm-v1        # google_genai: 'gemini-2.5-flash'
-                                      # huggingface:  'frederic-li-hanchen/bekanntmachung-llm-v1' (LoRA adapter ID)
+  model_provider: google_genai        # 'google_genai' or 'huggingface'
+  model_name: gemini-2.5-flash        # google_genai: 'gemini-2.5-flash' or huggingface: 'frederic-li-hanchen/bekanntmachung-llm-v1' (LoRA adapter ID)
   temperature: 0.1
   max_tokens: 4000
   # google_genai-specific
