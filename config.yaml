@@ -66,12 +66,10 @@ excel_formatting:
   # types appear (suggesting your institution may be eligible)
   inclusion_keywords:
     - non-university research institution
-    - non-university research and
     - research institution
 
   # exclusion_criteria: highlight in light red if any of these terms appear
   # (flagging that restrictions may apply)
   exclusion_keywords:
     - non-university research institution
-    - non-university research and
     - research institution

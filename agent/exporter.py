@@ -37,21 +37,32 @@ _LINE_HEIGHT_PT = 14.5
 _MIN_ROW_HEIGHT = 15
 
 
+# Up to this many filler words are allowed between consecutive words of a
+# multi-word keyword (e.g. "non-university research institution" will also match
+# "non-university research and scientific institution").
+_MAX_GAP_WORDS = 3
+_GAP = r'(?:\W+\w+){0,' + str(_MAX_GAP_WORDS) + r'}\W+'
+
+
+def _make_keyword_pattern(kw: str) -> str:
+    """Build a regex pattern for a single keyword string.
+
+    - Word boundaries prevent substring matches (e.g. 'AI' inside 'making').
+    - A trailing 's' is optional to match simple English plurals.
+    - For multi-word keywords each consecutive pair of words may be separated by
+      up to _MAX_GAP_WORDS filler words, so "non-university research institution"
+      also matches "non-university research and scientific institution".
+    """
+    words = kw.split()
+    parts = [r'\b' + re.escape(w) + r'\b' for w in words[:-1]]
+    parts.append(r'\b' + re.escape(words[-1]) + r's?\b')
+    return _GAP.join(parts)
+
+
 def _contains_any(text: str, keywords: list[str]) -> bool:
-    """
-    Return True if any keyword appears as a whole word in text (case-insensitive).
-
-    Word-boundary matching prevents short terms like 'KI' or 'AI' from matching
-    inside longer words (e.g. 'making', 'sustainable').
-
-    A trailing 's' is made optional so that singular keywords (e.g. 'research
-    institution', 'Forschungseinrichtung') also match their plural forms
-    ('research institutions', 'Forschungseinrichtungen' is handled separately,
-    but simple English/German plurals ending in 's' are covered automatically).
-    """
+    """Return True if any keyword matches anywhere in text (case-insensitive)."""
     for kw in keywords:
-        pattern = r'\b' + re.escape(kw) + r's?\b'
-        if re.search(pattern, text, re.IGNORECASE):
+        if re.search(_make_keyword_pattern(kw), text, re.IGNORECASE):
             return True
     return False
 
